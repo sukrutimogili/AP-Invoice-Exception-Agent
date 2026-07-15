@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "scenario": 4,
+    "name": "malformed_extraction",
+    "description": "Invoice where grand_total field is physically absent from the document. Expected outcome: ExtractionFailure / NEEDS_REEXTRACTION. The system must never fabricate the total (FR-1.3).",
+    "source": "requirements.md §8 scenario 4"
+  },
+  "invoice_text": "INVOICE\n\nFrom: Beta Components Inc\n99 Factory Road, Industryville\n\nBill To: LedgerGate Corp\n456 Finance Street, Metropolis\n\nInvoice Number: INV-2026-0099\nInvoice Date:   2026-01-20\nDue Date:       2026-02-19\nPayment Terms:  Net 30\n\nPO Reference:       PO-2025-0200\nContract Reference: CTR-2025-0031\n\nLine Items:\n-----------\n1. Bolt Assembly M8   Qty: 100   Unit Price: $1.25   Amount: $125.00\n\nSubtotal:  $125.00\nTax (10%):  $12.50\n[TOTAL FIELD INTENTIONALLY OMITTED — malformed document test]\n\nPayment instructions to follow.",
+  "expected": {
+    "outcome": "failure",
+    "extraction_status": "NEEDS_REEXTRACTION",
+    "reason_contains": ["grand_total", "MISSING_REQUIRED_FIELD", "SCHEMA_VALIDATION_FAILED", "RETRY_VALIDATION_FAILED"],
+    "must_not_fabricate": true,
+    "must_not_enter_payment_path": true
+  }
+}

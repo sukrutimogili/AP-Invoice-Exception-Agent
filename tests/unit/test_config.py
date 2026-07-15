@@ -68,9 +68,14 @@ def _make_settings(**overrides: str) -> Settings:
 
     Always supplies a valid OPENROUTER_API_KEY unless the test overrides it.
     """
-    defaults: dict[str, str] = {
+    defaults: dict = {
         "openrouter_api_key": "sk-or-v1-test-key-valid",
-        "openrouter_model": "meta-llama/llama-3.1-8b-instruct:free",
+        "openrouter_fallback_chain": [
+            "openrouter/auto",
+            "google/gemma-3-27b-it:free",
+            "qwen/qwen3-235b-a22b:free",
+            "deepseek/deepseek-r1-0528:free",
+        ],
         "openrouter_base_url": "https://openrouter.ai/api/v1",
         "database_url": "sqlite:///./test.db",
         "approval_threshold_default": "10000",
@@ -164,8 +169,10 @@ class TestValidConfig:
         # 1. OPENROUTER_API_KEY — required, no default
         assert settings.openrouter_api_key == "sk-or-v1-test-key-valid"
 
-        # 2. OPENROUTER_MODEL
-        assert settings.openrouter_model == "meta-llama/llama-3.1-8b-instruct:free"
+        # 2. OPENROUTER_FALLBACK_CHAIN — ordered model fallback list
+        assert isinstance(settings.openrouter_fallback_chain, list)
+        assert len(settings.openrouter_fallback_chain) == 4
+        assert settings.openrouter_fallback_chain[0] == "openrouter/auto"
 
         # 3. OPENROUTER_BASE_URL
         assert settings.openrouter_base_url == "https://openrouter.ai/api/v1"

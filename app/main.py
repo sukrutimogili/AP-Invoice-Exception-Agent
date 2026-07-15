@@ -1,10 +1,10 @@
 """
 app/main.py — FastAPI application entry point for LedgerGate-Agent.
 
-Phase 0 scope: skeleton only.
+Current scope (Phase 4):
   - Config is validated at startup via get_settings() (fails fast if env is bad).
   - /health endpoint returns 200 + status payload.
-  - No business logic, no domain models, no additional endpoints.
+  - Exception human-gate endpoints mounted at /exceptions (FR-4.3).
 
 Run with:
     uvicorn app.main:app --reload
@@ -19,14 +19,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from api.audit import router as audit_router
+from api.exceptions import router as exceptions_router
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Startup validation — this is the fail-fast gate spec.md §2 requires.
-# get_settings() will raise pydantic_core.ValidationError immediately if any
-# required environment variable (e.g. OPENROUTER_API_KEY) is absent or invalid.
-# The exception propagates before the server accepts any requests.
+# Startup validation — fail-fast gate (spec.md §2).
 # ---------------------------------------------------------------------------
 _settings = get_settings()
 
@@ -37,11 +36,15 @@ app = FastAPI(
         "extracts, matches, routes, and audits invoices."
     ),
     version="0.1.0",
-    # Disable the default /redoc and /docs in production via config later;
-    # leave them on for Phase 0 development convenience.
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# ---------------------------------------------------------------------------
+# Mount routers
+# ---------------------------------------------------------------------------
+app.include_router(exceptions_router)
+app.include_router(audit_router)
 
 
 # ---------------------------------------------------------------------------
@@ -65,15 +68,15 @@ def health() -> JSONResponse:
 
     Authorization: none (internal ops endpoint).
 
-    Returns a JSON payload confirming the service is up and which model /
-    database are configured.  Secrets (API keys) are never included.
+    Returns a JSON payload confirming the service is up and which fallback
+    chain / database are configured.  Secrets (API keys) are never included.
     """
     payload: dict[str, Any] = {
         "status": "ok",
         "service": "LedgerGate-Agent",
         "version": app.version,
         "config": {
-            "openrouter_model": _settings.openrouter_model,
+            "openrouter_fallback_chain": _settings.openrouter_fallback_chain,
             "database_url": _settings.database_url,
             "log_level": _settings.log_level,
         },

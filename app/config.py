@@ -16,7 +16,7 @@ import logging
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, HttpUrl, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -58,11 +58,18 @@ class Settings(BaseSettings):
         ),
     ]
 
-    openrouter_model: str = Field(
-        default="meta-llama/llama-3.1-8b-instruct:free",
+    openrouter_fallback_chain: list[str] = Field(
+        default=[
+            "openrouter/auto",               # 1st: OpenRouter meta-router (picks best free model)
+            "google/gemma-3-27b-it:free",    # 2nd: Gemma 3 27B
+            "qwen/qwen3-235b-a22b:free",     # 3rd: Qwen3 235B A22B
+            "deepseek/deepseek-r1-0528:free",  # 4th: DeepSeek R1 0528
+        ],
         description=(
-            "OpenRouter model identifier passed to /chat/completions. "
-            "Must be a valid model slug available on OpenRouter."
+            "Ordered list of OpenRouter model slugs tried in sequence. "
+            "Each model gets one automatic retry on 429 (respecting Retry-After) "
+            "before the next model in the chain is attempted. "
+            "Override via OPENROUTER_FALLBACK_CHAIN as a JSON array in .env."
         ),
     )
 
@@ -195,7 +202,7 @@ def get_settings() -> Settings:
     logger.info(
         "Configuration loaded",
         extra={
-            "openrouter_model": settings.openrouter_model,
+            "openrouter_fallback_chain": settings.openrouter_fallback_chain,
             "database_url": settings.database_url,
             "log_level": settings.log_level,
         },

@@ -1,0 +1,24 @@
+{
+  "_meta": {
+    "scenario": 1,
+    "name": "clean_invoice",
+    "description": "Fully valid invoice — all fields present, amounts consistent. Expected outcome: ExtractionSuccess.",
+    "source": "requirements.md §8 scenario 1"
+  },
+  "invoice_text": "INVOICE\n\nFrom: Acme Supplies Ltd\n123 Industrial Way, Springfield\nvendor@acme-supplies.com\n\nBill To: LedgerGate Corp\n456 Finance Street, Metropolis\n\nInvoice Number: INV-2026-0042\nInvoice Date:   2026-01-15\nDue Date:       2026-02-14\nPayment Terms:  Net 30\n\nPO Reference:       PO-2025-0100\nContract Reference: CTR-2025-0018\n\nLine Items:\n-----------\n1. Widget Type A        Qty: 10   Unit Price: $38.00   Amount: $380.00\n2. Shipping & Handling  Qty:  1   Unit Price: $20.00   Amount:  $20.00\n\nSubtotal:  $400.00\nTax (5%):   $20.00\nTotal Due: $420.00\n\nPlease remit payment to account 99-1234-5678 by the due date.\nThank you for your business.",
+  "expected": {
+    "outcome": "success",
+    "extraction_status": "EXTRACTED",
+    "invoice_number": "INV-2026-0042",
+    "vendor_name": "Acme Supplies Ltd",
+    "invoice_date": "2026-01-15",
+    "po_reference": "PO-2025-0100",
+    "contract_reference": "CTR-2025-0018",
+    "subtotal": "400.00",
+    "tax": "20.00",
+    "grand_total": "420.00",
+    "due_date": "2026-02-14",
+    "payment_terms": "Net 30",
+    "line_item_count": 2
+  }
+}
