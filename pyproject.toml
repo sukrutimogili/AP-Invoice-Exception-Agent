@@ -24,6 +24,13 @@ dependencies = [
     "python-json-logger==2.0.7",
     # .env file loading
     "python-dotenv==1.0.1",
+    # PDF text extraction — pdfplumber chosen over pypdf because it uses
+    # layout analysis (pdfminer.six under the hood) to reconstruct reading
+    # order correctly for table-heavy and multi-column invoice documents.
+    # pypdf returns raw character streams that produce garbled output on
+    # those layouts; pdfplumber's page.extract_text() produces clean,
+    # line-ordered text with no extra configuration required.
+    "pdfplumber==0.11.10",
 ]
 
 [project.optional-dependencies]
