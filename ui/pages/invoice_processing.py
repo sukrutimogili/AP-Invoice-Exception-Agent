@@ -1,0 +1,417 @@
+"""
+ui/pages/invoice_processing.py — Invoice Processing page.
+
+Provides two submission modes:
+  1. Document Upload — paste or upload a text invoice → LLM extraction pipeline.
+  2. Structured Submit — fill in a form → direct pipeline (no LLM extraction).
+
+Both modes display:
+  - Extracted invoice fields in a clean table
+  - Matching check results with pass/fail badges
+  - Routing decision badge
+  - Payment schedule (if STP)
+  - Exception reason codes (if EXCEPTION)
+  - Discount recommendation (if applicable)
+
+Architecture: zero business logic here — all work delegated to
+ui/components/pipeline_runner.py which calls the existing domain modules.
+"""
+
+from __future__ import annotations
+
+import io
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
+
+import streamlit as st
+
+from ui.components.badges import (
+    check_badge,
+    discount_badge,
+    outcome_badge,
+    reason_badge,
+)
+from ui.components.pipeline_runner import (
+    PipelineResult,
+    run_extraction_pipeline,
+    run_submit_pipeline,
+)
+from models.contract import ContractCreate, ContractLineItemCreate, DiscountTermSchema
+from models.invoice import InvoiceCreate, InvoiceLineItemCreate
+from models.purchase_order import POLineItemCreate, PurchaseOrderCreate
+from models.vendor import VendorCreate
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _safe_decimal(val: str, default: str = "0") -> Decimal:
+    try:
+        return Decimal(val.strip())
+    except (InvalidOperation, AttributeError):
+        return Decimal(default)
+
+
+def _render_result(result: PipelineResult) -> None:
+    """Render the full PipelineResult — shared between both submission modes."""
+
+    st.divider()
+    st.subheader("Processing Result")
+
+    # --- Outcome badge ---
+    st.markdown(
+        outcome_badge(result.outcome),
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Invoice ID: `{result.invoice_id}`  ·  Processed at: {result.processed_at}")
+
+    if result.outcome == "ERROR":
+        st.error(result.error_message or "An unexpected error occurred.")
+        return
+
+    if result.outcome == "NEEDS_REEXTRACTION":
+        st.error(
+            f"Extraction failed — this invoice cannot be processed.  \n"
+            f"**Reason:** `{result.extraction_failure_reason}`  \n\n"
+            "Please check that the document is a valid UTF-8 text file containing "
+            "all required invoice fields."
+        )
+        return
+
+    # --- Extracted fields ---
+    if result.invoice_fields:
+        with st.expander("📄 Extracted Invoice Fields", expanded=True):
+            fields = result.invoice_fields
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**Invoice #:** {fields.get('invoice_number', '—')}")
+                st.markdown(f"**Vendor:** {fields.get('vendor_name', '—')}")
+                st.markdown(f"**Invoice Date:** {fields.get('invoice_date', '—')}")
+                st.markdown(f"**Due Date:** {fields.get('due_date', '—')}")
+            with col2:
+                st.markdown(f"**PO Reference:** {fields.get('po_reference', '—')}")
+                st.markdown(f"**Contract Ref:** {fields.get('contract_reference', '—')}")
+                st.markdown(f"**Payment Terms:** {fields.get('payment_terms', '—')}")
+                st.markdown(f"**Grand Total:** ${fields.get('grand_total', '—')}")
+
+            # Line items table
+            line_items = fields.get("line_items", [])
+            if line_items:
+                st.markdown("**Line Items:**")
+                import pandas as pd
+                df = pd.DataFrame(line_items)
+                df.columns = [c.replace("_", " ").title() for c in df.columns]
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # --- Match checks ---
+    if result.match_checks:
+        with st.expander("🔍 Matching Checks (FR-3.1)", expanded=True):
+            cols = st.columns(4)
+            for i, (check_name, passed) in enumerate(result.match_checks.items()):
+                with cols[i % 4]:
+                    st.markdown(
+                        f"**{check_name}**  \n{check_badge(passed)}",
+                        unsafe_allow_html=True,
+                    )
+
+    # --- STP path ---
+    if result.outcome == "STP":
+        sched = result.payment_schedule
+        if sched:
+            with st.expander("💳 Payment Schedule", expanded=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Scheduled Date", sched.get("scheduled_date", "—"))
+                    st.metric("Amount", f"${sched.get('amount', '—')}")
+                with col2:
+                    discount_taken = sched.get("discount_taken", False)
+                    st.metric(
+                        "Discount Applied",
+                        "Yes" if discount_taken else "No",
+                    )
+                    if discount_taken and sched.get("discount_amount"):
+                        st.metric("Discount Amount", f"${sched['discount_amount']}")
+
+        # Discount recommendation badge
+        if result.discount_recommendation:
+            st.markdown("**Discount Recommendation:**")
+            st.markdown(
+                discount_badge(result.discount_recommendation),
+                unsafe_allow_html=True,
+            )
+
+    # --- EXCEPTION path ---
+    if result.outcome == "EXCEPTION":
+        with st.expander("⚠️ Exception Details", expanded=True):
+            st.markdown("**This invoice has been routed to the human review queue.**")
+            st.markdown("**Reason Codes:**")
+            for code in result.exception_reasons:
+                st.markdown(reason_badge(code), unsafe_allow_html=True)
+            st.info(
+                "Use the **Audit** page to view the full decision trail.  "
+                "Use `POST /exceptions/{invoice_id}/approve` or `/reject` "
+                "to resolve this exception."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Mode 1 — Document Upload (LLM extraction)
+# ---------------------------------------------------------------------------
+
+def _render_upload_tab() -> None:
+    st.markdown(
+        "Upload a plain-text invoice document. The system will extract all fields "
+        "using the LLM extraction pipeline, then run matching and routing."
+    )
+    st.caption("⚠️ Requires a valid `OPENROUTER_API_KEY` in your `.env` file.")
+
+    upload_method = st.radio(
+        "Input method",
+        ["Paste text", "Upload file"],
+        horizontal=True,
+    )
+
+    invoice_text: str | None = None
+
+    if upload_method == "Paste text":
+        invoice_text = st.text_area(
+            "Invoice text",
+            height=280,
+            placeholder=(
+                "Paste the full invoice text here.\n"
+                "Example:\n"
+                "INVOICE #INV-2025-001\nVendor: Acme Supplies Ltd\n..."
+            ),
+        )
+    else:
+        uploaded = st.file_uploader(
+            "Upload invoice file",
+            type=["txt"],
+            help="Plain-text (.txt) files only, max 1 MB, UTF-8 encoded.",
+        )
+        if uploaded is not None:
+            if uploaded.size > 1_048_576:
+                st.error("File exceeds 1 MB limit.")
+            else:
+                try:
+                    invoice_text = uploaded.read().decode("utf-8")
+                    st.success(f"Loaded: **{uploaded.name}** ({uploaded.size:,} bytes)")
+                except UnicodeDecodeError:
+                    st.error("File is not valid UTF-8. Please save as UTF-8 and retry.")
+
+    if st.button("🚀 Extract & Process", type="primary", disabled=not invoice_text):
+        if not invoice_text or not invoice_text.strip():
+            st.warning("Please provide invoice text before processing.")
+            return
+
+        with st.spinner("Running LLM extraction and processing pipeline…"):
+            result = run_extraction_pipeline(invoice_text)
+
+        st.session_state["last_result"] = result
+        _render_result(result)
+
+
+# ---------------------------------------------------------------------------
+# Mode 2 — Structured Submit (form-based, no LLM)
+# ---------------------------------------------------------------------------
+
+def _render_submit_tab() -> None:
+    st.markdown(
+        "Fill in the invoice fields directly. The system runs matching and routing "
+        "without LLM extraction. Use this for testing or system-integration scenarios."
+    )
+
+    with st.form("invoice_submit_form", clear_on_submit=False):
+        st.subheader("Invoice Header")
+        col1, col2 = st.columns(2)
+        with col1:
+            invoice_number = st.text_input("Invoice Number *", value="INV-2025-001")
+            vendor_name = st.text_input("Vendor Name *", value="Acme Supplies Ltd")
+            invoice_date = st.date_input("Invoice Date *", value=date.today() - timedelta(days=5))
+            po_reference = st.text_input("PO Reference *", value="PO-2025-0100")
+        with col2:
+            contract_reference = st.text_input("Contract Reference *", value="CTR-2025-0018")
+            due_date = st.date_input("Due Date *", value=date.today() + timedelta(days=25))
+            payment_terms = st.text_input("Payment Terms *", value="Net 30")
+            grand_total_str = st.text_input("Grand Total *", value="420.00")
+
+        col3, col4 = st.columns(2)
+        with col3:
+            subtotal_str = st.text_input("Subtotal *", value="400.00")
+        with col4:
+            tax_str = st.text_input("Tax *", value="20.00")
+
+        st.subheader("Line Items")
+        st.caption("Enter one line item per row. Separate rows with the ➕ button.")
+        n_lines = st.number_input("Number of line items", min_value=1, max_value=10, value=2)
+
+        line_data = []
+        for i in range(int(n_lines)):
+            st.markdown(f"**Line {i + 1}**")
+            lc1, lc2, lc3 = st.columns(3)
+            with lc1:
+                desc = st.text_input(f"Description", value=f"Item {i+1}", key=f"desc_{i}")
+            with lc2:
+                qty_s = st.text_input("Qty", value="10" if i == 0 else "1", key=f"qty_{i}")
+            with lc3:
+                up_s = st.text_input("Unit Price", value="38.00" if i == 0 else "20.00", key=f"up_{i}")
+            line_data.append((i + 1, desc, qty_s, up_s))
+
+        st.subheader("Context (optional — leave blank to trigger exceptions)")
+        st.caption("Provide vendor / PO / contract to enable STP. Leave blank to test exception routing.")
+        col5, col6 = st.columns(2)
+        with col5:
+            has_vendor = st.checkbox("Include vendor (active)", value=True)
+            has_po = st.checkbox("Include purchase order", value=True)
+        with col6:
+            has_contract = st.checkbox("Include contract", value=True)
+            approval_on_file = st.checkbox("Approval on file", value=False)
+
+        discount_term_raw = st.text_input(
+            "Discount term (optional)",
+            value="2/10 net 30",
+            help='e.g. "2/10 net 30" means 2% discount if paid within 10 days on net-30 terms.',
+        )
+
+        submitted = st.form_submit_button("🚀 Submit Invoice", type="primary")
+
+    if submitted:
+        # --- Build line items ---
+        line_items = []
+        for ln, desc, qty_s, up_s in line_data:
+            qty = _safe_decimal(qty_s, "1")
+            up = _safe_decimal(up_s, "0")
+            amount = (qty * up).quantize(Decimal("0.01"))
+            try:
+                line_items.append(
+                    InvoiceLineItemCreate(
+                        line_number=ln,
+                        description=desc or f"Item {ln}",
+                        qty=qty,
+                        unit_price=up,
+                        amount=amount,
+                    )
+                )
+            except Exception as e:
+                st.error(f"Line item {ln} is invalid: {e}")
+                return
+
+        # --- Build InvoiceCreate ---
+        try:
+            invoice = InvoiceCreate(
+                invoice_number=invoice_number,
+                vendor_name=vendor_name,
+                invoice_date=invoice_date,
+                po_reference=po_reference,
+                contract_reference=contract_reference,
+                due_date=due_date,
+                payment_terms=payment_terms,
+                subtotal=_safe_decimal(subtotal_str),
+                tax=_safe_decimal(tax_str),
+                grand_total=_safe_decimal(grand_total_str, "1"),
+                line_items=line_items,
+            )
+        except Exception as e:
+            st.error(f"Invoice validation failed: {e}")
+            return
+
+        # --- Build optional mock entities ---
+        vendor: VendorCreate | None = None
+        po: PurchaseOrderCreate | None = None
+        contract: ContractCreate | None = None
+
+        if has_vendor:
+            vendor = VendorCreate(
+                vendor_code="ACME-001",
+                name=vendor_name,
+                is_active=True,
+            )
+
+        if has_po:
+            po_lines = []
+            for i, (ln, desc, qty_s, up_s) in enumerate(line_data):
+                po_lines.append(
+                    POLineItemCreate(
+                        line_number=ln,
+                        description=desc or f"Item {ln}",
+                        qty=_safe_decimal(qty_s, "1"),
+                        unit_price=_safe_decimal(up_s, "0"),
+                    )
+                )
+            try:
+                po = PurchaseOrderCreate(
+                    po_number=po_reference,
+                    vendor_id="vendor-uuid-001",
+                    po_total=_safe_decimal(grand_total_str, "1"),
+                    approval_threshold=Decimal("10000.00"),
+                    line_items=po_lines,
+                )
+            except Exception as e:
+                st.error(f"PO construction failed: {e}")
+                return
+
+        if has_contract:
+            contract_lines = []
+            for ln, desc, qty_s, up_s in line_data:
+                contract_lines.append(
+                    ContractLineItemCreate(
+                        line_number=ln,
+                        description=desc or f"Item {ln}",
+                        unit_price=_safe_decimal(up_s, "0"),
+                    )
+                )
+
+            # Parse discount term if provided
+            discount_term: DiscountTermSchema | None = None
+            if discount_term_raw.strip():
+                from discount.parser import parse_discount_term
+                discount_term = parse_discount_term(discount_term_raw.strip())
+
+            try:
+                contract = ContractCreate(
+                    contract_reference=contract_reference,
+                    vendor_id="vendor-uuid-001",
+                    discount_term=discount_term,
+                    line_items=contract_lines,
+                )
+            except Exception as e:
+                st.error(f"Contract construction failed: {e}")
+                return
+
+        with st.spinner("Running matching and routing pipeline…"):
+            result = run_submit_pipeline(
+                invoice=invoice,
+                vendor=vendor,
+                po=po,
+                contract=contract,
+                approval_on_file=approval_on_file,
+            )
+
+        st.session_state["last_result"] = result
+        _render_result(result)
+
+
+# ---------------------------------------------------------------------------
+# Page entry point
+# ---------------------------------------------------------------------------
+
+def render() -> None:
+    st.title("📋 Invoice Processing")
+    st.markdown(
+        "Submit an invoice for extraction, matching, routing, and scheduling.  "
+        "Clean invoices are straight-through processed (STP); exceptions are "
+        "routed to the human review queue."
+    )
+
+    tab1, tab2 = st.tabs(["📤 Document Upload (LLM)", "🖊 Structured Submit (Form)"])
+
+    with tab1:
+        _render_upload_tab()
+
+    with tab2:
+        _render_submit_tab()
+
+    # Re-show the last result if navigating back
+    if "last_result" in st.session_state and st.session_state.get("show_last_result"):
+        _render_result(st.session_state["last_result"])

@@ -11,6 +11,7 @@ dependencies = [
     # API framework
     "fastapi==0.115.5",
     "uvicorn[standard]==0.32.1",
+    "python-multipart==0.0.20",   # required by FastAPI for multipart/form-data (file upload)
     # Settings / config — pydantic 2.10+ ships cp313 wheels
     "pydantic==2.10.4",
     "pydantic-settings==2.7.0",
@@ -54,8 +55,24 @@ python_functions = ["test_*"]
 markers = [
     "integration: marks tests that call the real OpenRouter API (deselect with -m 'not integration')",
     "e2e: marks end-to-end scenario tests (all 10 requirements.md §8 scenarios)",
-    "security: marks adversarial/injection tests",
+    "security: marks adversarial/injection tests (Phase 6 — re-run on every prompt change per spec.md §5)",
 ]
+# ---------------------------------------------------------------------------
+# Security suite usage
+# ---------------------------------------------------------------------------
+# Run the full adversarial hardening suite:
+#   pytest -m security -v
+#
+# Run security + unit (exclude integration/e2e):
+#   pytest -m "security or (not integration and not e2e)" -v
+#
+# Re-pin prompt hash after a deliberate prompt change:
+#   python -c "import hashlib; print(hashlib.sha256(open('extraction/prompts/v1_extract.md','rb').read()).hexdigest())"
+#   # then update _EXPECTED_PROMPT_SHA256 in tests/security/test_injection.py
+#
+# spec.md §5 mandate: the security suite MUST be re-run before merging any
+# change to extraction/prompts/*.  The conftest.py detects prompt changes and
+# warns; TestPromptVersionPin blocks on a stale hash pin.
 
 # ---------------------------------------------------------------------------
 # ruff (linting)
