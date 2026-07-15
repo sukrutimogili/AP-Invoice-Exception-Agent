@@ -40,7 +40,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*", "models*", "extraction*", "matching*", "routing*", "discount*", "audit*", "api*"]
+include = ["app*", "models*", "db*", "extraction*", "matching*", "routing*", "discount*", "audit*", "api*", "services*"]
 
 # ---------------------------------------------------------------------------
 # pytest
