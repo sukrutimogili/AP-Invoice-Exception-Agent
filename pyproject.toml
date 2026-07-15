@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ap-invoice-exception-agent"
+version = "0.1.0"
+description = "AP Invoice & Contract Exception Agent (LedgerGate-Agent)"
+requires-python = ">=3.11"
+dependencies = [
+    # API framework
+    "fastapi==0.115.5",
+    "uvicorn[standard]==0.32.1",
+    # Settings / config — pydantic 2.10+ ships cp313 wheels
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    # HTTP client (OpenRouter calls)
+    "httpx==0.28.1",
+    # Database
+    "sqlalchemy==2.0.36",
+    "alembic==1.14.0",
+    # Structured logging
+    "python-json-logger==2.0.7",
+    # .env file loading
+    "python-dotenv==1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "pytest-cov==6.0.0",
+    "httpx==0.28.1",      # also the FastAPI test client transport
+    "ruff==0.8.4",
+    "black==24.10.0",
+    "mypy==1.14.1",
+    "types-python-dateutil==2.9.0.20241206",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "models*", "extraction*", "matching*", "routing*", "discount*", "audit*", "api*"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# ---------------------------------------------------------------------------
+# ruff (linting)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "S", "B", "A", "C4", "PTH", "RUF"]
+ignore = ["S101"]   # allow assert in tests
+
+# ---------------------------------------------------------------------------
+# black (formatting)
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+# ---------------------------------------------------------------------------
+# mypy (static analysis)
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]

@@ -1,0 +1,4 @@
+# extraction/prompts/
+# Prompt templates live here, one file per version.
+# Naming convention: v{N}_{purpose}.md  (e.g. v1_extract.md)
+# Changing a prompt bumps the version number — see spec.md §5.

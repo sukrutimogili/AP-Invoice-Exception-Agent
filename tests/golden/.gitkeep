@@ -1,0 +1,4 @@
+# tests/golden/
+# JSON fixtures for the 10 golden-dataset scenarios from requirements.md §8.
+# One file per scenario, added in Phase 2+ as each scenario is implemented.
+# Naming: scenario_{N:02d}_{slug}.json
