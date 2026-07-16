@@ -113,6 +113,13 @@ class PipelineResult:
     po_conflict_diff: dict[str, dict[str, Any]] | None = None
     contract_conflict_diff: dict[str, dict[str, Any]] | None = None
 
+    # Extraction warnings — set when a PO or contract document was supplied but
+    # extraction failed (either a typed POExtractionFailure/ContractExtractionFailure
+    # or an unexpected exception).  None means "no document was uploaded" OR
+    # "extraction succeeded".  A non-None value is always user-readable.
+    po_extraction_warning: str | None = None
+    contract_extraction_warning: str | None = None
+
     processed_at: str = ""
     error_message: str | None = None  # user-friendly; never a stack trace
 
@@ -212,6 +219,8 @@ def _from_service_result(
     invoice_id: str,
     po_conflict_diff: dict[str, dict[str, Any]] | None = None,
     contract_conflict_diff: dict[str, dict[str, Any]] | None = None,
+    po_extraction_warning: str | None = None,
+    contract_extraction_warning: str | None = None,
 ) -> PipelineResult:
     """Convert a service-layer result to a PipelineResult for the UI."""
     return PipelineResult(
@@ -227,6 +236,8 @@ def _from_service_result(
         discount_detail=_extract_discount_detail(invoice_id),
         po_conflict_diff=po_conflict_diff,
         contract_conflict_diff=contract_conflict_diff,
+        po_extraction_warning=po_extraction_warning,
+        contract_extraction_warning=contract_extraction_warning,
         processed_at=result.processed_at,
     )
 
@@ -237,6 +248,8 @@ def _make_conflict_pipeline_result(
     po_conflict_diff: dict[str, dict[str, Any]] | None,
     contract_conflict_diff: dict[str, dict[str, Any]] | None,
     processed_at: str,
+    po_extraction_warning: str | None = None,
+    contract_extraction_warning: str | None = None,
 ) -> PipelineResult:
     """
     Build a EXCEPTION/DOCUMENT_CONFLICT PipelineResult without running the
@@ -250,6 +263,8 @@ def _make_conflict_pipeline_result(
         invoice_fields=_invoice_to_dict(invoice),
         po_conflict_diff=po_conflict_diff,
         contract_conflict_diff=contract_conflict_diff,
+        po_extraction_warning=po_extraction_warning,
+        contract_extraction_warning=contract_extraction_warning,
         processed_at=processed_at,
     )
 
@@ -340,8 +355,10 @@ def run_extraction_pipeline_with_documents(
     -------------------
     - Invoice, PO, and contract are each extracted independently.
     - PO/contract extraction failure does NOT block the invoice.  If either
-      agent returns ExtractionFailure (or if no document was supplied), None
-      is passed to run_pipeline() — the matching engine will flag
+      agent returns a typed ExtractionFailure (or raises an unexpected exception),
+      extracted_po / extracted_contract is left as None and a human-readable
+      message is captured in po_extraction_warning / contract_extraction_warning
+      on the returned PipelineResult.  The matching engine will flag
       PO_NOT_FOUND / CONTRACT_NOT_FOUND as usual.
 
     Upsert and conflict detection
@@ -360,9 +377,14 @@ def run_extraction_pipeline_with_documents(
         contract_text: Raw text of the contract document, or None if not uploaded.
 
     Returns:
-        PipelineResult.  outcome='NEEDS_REEXTRACTION' if invoice extraction
-        fails; outcome='EXCEPTION' with reason DOCUMENT_CONFLICT if a
-        conflict is detected; otherwise the normal STP/EXCEPTION routing.
+        PipelineResult.
+        - outcome='NEEDS_REEXTRACTION' if invoice extraction fails.
+        - outcome='EXCEPTION' with reason DOCUMENT_CONFLICT if a conflict is
+          detected on an uploaded PO or contract.
+        - Otherwise the normal STP/EXCEPTION routing outcome.
+        - po_extraction_warning / contract_extraction_warning are non-None when
+          a document was supplied but extraction failed (typed failure or raised
+          exception); None when no document was uploaded or extraction succeeded.
     """
     from datetime import datetime as _dt
     settings = get_settings()
@@ -411,6 +433,7 @@ def run_extraction_pipeline_with_documents(
     # -----------------------------------------------------------------------
     extracted_po: PurchaseOrderCreate | None = None
     extracted_po_raw: str | None = None    # discount_term_raw equiv — not used for PO
+    po_extraction_warning: str | None = None
 
     if po_text and po_text.strip():
         try:
@@ -418,15 +441,25 @@ def run_extraction_pipeline_with_documents(
             po_extraction = po_agent.extract(po_text)
             if isinstance(po_extraction, POExtractionSuccess):
                 extracted_po = po_extraction.po
-            # POExtractionFailure → leave extracted_po as None (non-blocking)
-        except Exception:
-            pass  # extraction errors are non-blocking for PO/contract
+            else:
+                # Typed failure — agent returned POExtractionFailure
+                assert isinstance(po_extraction, POExtractionFailure)
+                po_extraction_warning = (
+                    f"PO extraction failed ({po_extraction.reason.value}): "
+                    f"{po_extraction.error_detail or 'no detail'}"
+                )
+        except Exception as exc:
+            po_extraction_warning = (
+                f"PO extraction raised an unexpected error "
+                f"({type(exc).__name__}): {exc}"
+            )
 
     # -----------------------------------------------------------------------
     # 3. Extract contract (optional, non-blocking)
     # -----------------------------------------------------------------------
     extracted_contract: ContractCreate | None = None
     extracted_contract_raw: str | None = None
+    contract_extraction_warning: str | None = None
 
     if contract_text and contract_text.strip():
         try:
@@ -437,8 +470,18 @@ def run_extraction_pipeline_with_documents(
             if isinstance(contract_extraction, ContractExtractionSuccess):
                 extracted_contract = contract_extraction.contract
                 extracted_contract_raw = contract_extraction.discount_term_raw
-        except Exception:
-            pass
+            else:
+                # Typed failure — agent returned ContractExtractionFailure
+                assert isinstance(contract_extraction, ContractExtractionFailure)
+                contract_extraction_warning = (
+                    f"Contract extraction failed ({contract_extraction.reason.value}): "
+                    f"{contract_extraction.error_detail or 'no detail'}"
+                )
+        except Exception as exc:
+            contract_extraction_warning = (
+                f"Contract extraction raised an unexpected error "
+                f"({type(exc).__name__}): {exc}"
+            )
 
     # -----------------------------------------------------------------------
     # 4. Upsert PO and contract; detect conflicts
@@ -512,6 +555,8 @@ def run_extraction_pipeline_with_documents(
             po_conflict_diff=po_conflict_diff,
             contract_conflict_diff=contract_conflict_diff,
             processed_at=processed_at,
+            po_extraction_warning=po_extraction_warning,
+            contract_extraction_warning=contract_extraction_warning,
         )
 
     # -----------------------------------------------------------------------
@@ -580,4 +625,10 @@ def run_extraction_pipeline_with_documents(
             processed_at=processed_at,
         )
 
-    return _from_service_result(result, invoice, invoice_id)
+    return _from_service_result(
+        result,
+        invoice,
+        invoice_id,
+        po_extraction_warning=po_extraction_warning,
+        contract_extraction_warning=contract_extraction_warning,
+    )

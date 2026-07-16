@@ -80,6 +80,20 @@ def _render_result(result: PipelineResult) -> None:
         )
         return
 
+    # --- PO / contract extraction warnings (non-blocking; shown on any outcome) ---
+    if result.po_extraction_warning:
+        st.warning(
+            f"⚠️ **Purchase Order not extracted** — the PO document was uploaded "
+            f"but extraction failed, so the invoice was processed without it.  \n"
+            f"**Detail:** {result.po_extraction_warning}"
+        )
+    if result.contract_extraction_warning:
+        st.warning(
+            f"⚠️ **Contract not extracted** — the contract document was uploaded "
+            f"but extraction failed, so the invoice was processed without it.  \n"
+            f"**Detail:** {result.contract_extraction_warning}"
+        )
+
     # --- Extracted fields ---
     if result.invoice_fields:
         with st.expander("📄 Extracted Invoice Fields", expanded=True):
