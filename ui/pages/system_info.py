@@ -18,6 +18,7 @@ from pathlib import Path
 import streamlit as st
 
 from app.config import get_settings
+from ui.components.theme import inject_theme
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +55,8 @@ def _mask_key(key: str) -> str:
 # ---------------------------------------------------------------------------
 
 def render() -> None:
-    st.title("⚙️ System Information")
+    inject_theme()
+    st.title("System Information")
     st.markdown(
         "Runtime configuration and service health.  "
         "Sensitive values (API keys) are masked."
@@ -70,35 +72,35 @@ def render() -> None:
     # -----------------------------------------------------------------------
     # Health indicators
     # -----------------------------------------------------------------------
-    st.subheader("🟢 Service Health")
+    st.subheader("Service Health")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.success("✅ Configuration loaded")
+        st.success("Configuration loaded")
 
     with col2:
         # Check API key is set (not placeholder)
         key = settings.openrouter_api_key
         if key and key != "sk-or-v1-replace-me-with-your-real-openrouter-api-key":
-            st.success("✅ API key configured")
+            st.success("API key configured")
         else:
-            st.error("❌ API key not set")
+            st.error("API key not set")
 
     with col3:
         # Check audit log is reachable
         try:
             import audit.writer as aw
             aw.get_all_events()
-            st.success("✅ Audit log active")
+            st.success("Audit log active")
         except Exception:
-            st.error("❌ Audit log error")
+            st.error("Audit log error")
 
     # -----------------------------------------------------------------------
     # LLM configuration
     # -----------------------------------------------------------------------
     st.divider()
-    st.subheader("🤖 LLM Configuration")
+    st.subheader("LLM Configuration")
 
     prompt_ver, prompt_sha = _prompt_version()
 
@@ -119,7 +121,7 @@ def render() -> None:
     # Business logic thresholds
     # -----------------------------------------------------------------------
     st.divider()
-    st.subheader("📊 Business Logic Thresholds")
+    st.subheader("Business Logic Thresholds")
 
     col_c, col_d, col_e = st.columns(3)
     with col_c:
@@ -145,7 +147,7 @@ def render() -> None:
     # Database
     # -----------------------------------------------------------------------
     st.divider()
-    st.subheader("🗄️ Database")
+    st.subheader("Database")
     st.markdown(f"**Connection:** `{settings.database_url}`")
     st.caption(
         "Phase 9 uses an in-process store (no active DB writes).  "
@@ -156,7 +158,7 @@ def render() -> None:
     # Audit & log
     # -----------------------------------------------------------------------
     st.divider()
-    st.subheader("📋 Runtime State")
+    st.subheader("Runtime State")
 
     import audit.writer as aw
     from api.payments import list_payment_schedules
@@ -180,7 +182,7 @@ def render() -> None:
     # Logging
     # -----------------------------------------------------------------------
     st.divider()
-    st.subheader("📝 Logging")
+    st.subheader("Logging")
     st.markdown(f"**Log level:** `{settings.log_level}`")
     st.caption(
         "Structured JSON logging is enabled on all state transitions.  "

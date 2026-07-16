@@ -27,33 +27,40 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="LedgerGate-Agent",
-    page_icon="🧾",
+    page_icon=":ledger:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ---------------------------------------------------------------------------
+# Inject shared Inter font and weight-tier CSS across all pages.
+# ---------------------------------------------------------------------------
+from ui.components.theme import inject_theme
+inject_theme()
 
 # ---------------------------------------------------------------------------
 # Import page modules.
 # All domain imports inside these modules resolve cleanly because sys.path[0]
 # is now the project root (the directory containing this file).
 # ---------------------------------------------------------------------------
-from ui.pages import audit_log, discount_optimization, invoice_processing, system_info
+from ui.pages import audit_log, dashboard, discount_optimization, invoice_processing, system_info
 
 # ---------------------------------------------------------------------------
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## 🧾 LedgerGate-Agent")
+    st.markdown("## LedgerGate-Agent")
     st.caption("AP Invoice Exception Agent")
     st.divider()
 
     page = st.radio(
         "Navigate",
         options=[
-            "📋 Invoice Processing",
-            "📖 Audit Log",
-            "💰 Discount Optimization",
-            "⚙️ System Information",
+            "Dashboard",
+            "Invoice Processing",
+            "Audit Log",
+            "Discount Optimization",
+            "System Information",
         ],
         label_visibility="collapsed",
     )
@@ -70,14 +77,17 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Route to the selected page
 # ---------------------------------------------------------------------------
-if page == "📋 Invoice Processing":
+if page == "Dashboard":
+    dashboard.render()
+
+elif page == "Invoice Processing":
     invoice_processing.render()
 
-elif page == "📖 Audit Log":
+elif page == "Audit Log":
     audit_log.render()
 
-elif page == "💰 Discount Optimization":
+elif page == "Discount Optimization":
     discount_optimization.render()
 
-elif page == "⚙️ System Information":
+elif page == "System Information":
     system_info.render()

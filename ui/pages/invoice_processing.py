@@ -37,6 +37,7 @@ from ui.components.pipeline_runner import (
     run_extraction_pipeline_with_documents,
     run_submit_pipeline,
 )
+from ui.components.theme import inject_theme
 from models.contract import ContractCreate, ContractLineItemCreate, DiscountTermSchema
 from models.invoice import InvoiceCreate, InvoiceLineItemCreate
 from models.purchase_order import POLineItemCreate, PurchaseOrderCreate
@@ -83,20 +84,20 @@ def _render_result(result: PipelineResult) -> None:
     # --- PO / contract extraction warnings (non-blocking; shown on any outcome) ---
     if result.po_extraction_warning:
         st.warning(
-            f"⚠️ **Purchase Order not extracted** — the PO document was uploaded "
+            f"**Purchase Order not extracted** — the PO document was uploaded "
             f"but extraction failed, so the invoice was processed without it.  \n"
             f"**Detail:** {result.po_extraction_warning}"
         )
     if result.contract_extraction_warning:
         st.warning(
-            f"⚠️ **Contract not extracted** — the contract document was uploaded "
+            f"**Contract not extracted** — the contract document was uploaded "
             f"but extraction failed, so the invoice was processed without it.  \n"
             f"**Detail:** {result.contract_extraction_warning}"
         )
 
     # --- Extracted fields ---
     if result.invoice_fields:
-        with st.expander("📄 Extracted Invoice Fields", expanded=True):
+        with st.expander("Extracted Invoice Fields", expanded=True):
             fields = result.invoice_fields
             col1, col2 = st.columns(2)
             with col1:
@@ -121,7 +122,7 @@ def _render_result(result: PipelineResult) -> None:
 
     # --- Match checks ---
     if result.match_checks:
-        with st.expander("🔍 Matching Checks (FR-3.1)", expanded=True):
+        with st.expander("Matching Checks (FR-3.1)", expanded=True):
             cols = st.columns(4)
             for i, (check_name, passed) in enumerate(result.match_checks.items()):
                 with cols[i % 4]:
@@ -134,7 +135,7 @@ def _render_result(result: PipelineResult) -> None:
     if result.outcome == "STP":
         sched = result.payment_schedule
         if sched:
-            with st.expander("💳 Payment Schedule", expanded=True):
+            with st.expander("Payment Schedule", expanded=True):
                 col1, col2 = st.columns(2)
                 with col1:
                     st.metric("Scheduled Date", sched.get("scheduled_date", "—"))
@@ -158,7 +159,7 @@ def _render_result(result: PipelineResult) -> None:
 
     # --- EXCEPTION path ---
     if result.outcome == "EXCEPTION":
-        with st.expander("⚠️ Exception Details", expanded=True):
+        with st.expander("Exception Details", expanded=True):
             st.markdown("**This invoice has been routed to the human review queue.**")
             st.markdown("**Reason Codes:**")
             for code in result.exception_reasons:
@@ -168,6 +169,27 @@ def _render_result(result: PipelineResult) -> None:
                 "Use `POST /exceptions/{invoice_id}/approve` or `/reject` "
                 "to resolve this exception."
             )
+
+        # --- Low-confidence fields (shown only when reason is LOW_CONFIDENCE_EXTRACTION) ---
+        if result.low_confidence_fields:
+            with st.expander("Low-Confidence Fields — Human Verification Required", expanded=True):
+                st.warning(
+                    "The LLM extracted the following fields but flagged them as **uncertain**.  "
+                    "The values come directly from the document — nothing was invented — but the "
+                    "reading may be ambiguous (e.g. an unusual number format, unclear column "
+                    "labelling, or an ambiguous date).  "
+                    "Please verify each value against the original document before approving."
+                )
+                st.markdown("**Flagged fields and extracted values:**")
+
+                import pandas as pd
+
+                rows = [
+                    {"Field": k, "Extracted Value": v}
+                    for k, v in result.low_confidence_fields.items()
+                ]
+                df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
         # --- Document Conflict diff (rendered separately, always expanded) ---
         if result.po_conflict_diff:
@@ -184,13 +206,13 @@ def _render_result(result: PipelineResult) -> None:
 
 def _render_conflict_diff(doc_type: str, diff: dict) -> None:
     """
-    Render a ⚠️ Document Conflict expander showing every disagreeing field.
+    Render a Document Conflict expander showing every disagreeing field.
 
     Args:
         doc_type: "PO" or "Contract" (display label only).
         diff:     dict[field_name, {"existing": str, "incoming": str}]
     """
-    with st.expander(f"⚠️ Document Conflict — {doc_type}", expanded=True):
+    with st.expander(f"Document Conflict — {doc_type}", expanded=True):
         st.warning(
             f"The uploaded **{doc_type}** document disagrees with the record "
             f"already stored in the database.  The existing row has **not** been "
@@ -285,14 +307,14 @@ def _render_upload_tab() -> None:
         "PO and Contract documents are optional — if omitted, the system falls "
         "back to database lookup using the references on the invoice."
     )
-    st.caption("⚠️ Requires a valid `OPENROUTER_API_KEY` in your `.env` file.")
+    st.caption("Requires a valid `OPENROUTER_API_KEY` in your `.env` file.")
 
     # ---- Invoice (required) ------------------------------------------------
-    st.subheader("📄 Invoice", divider="gray")
+    st.subheader("Invoice", divider="gray")
     invoice_text = _upload_widget("Invoice", "inv")
 
     # ---- Purchase Order (optional) -----------------------------------------
-    st.subheader("📋 Purchase Order", divider="gray")
+    st.subheader("Purchase Order", divider="gray")
     st.caption(
         "Optional. If supplied, the extracted PO is upserted into the database.  "
         "A conflict with an existing record routes the invoice to EXCEPTION."
@@ -300,7 +322,7 @@ def _render_upload_tab() -> None:
     po_text = _upload_widget("Purchase Order", "po")
 
     # ---- Contract (optional) -----------------------------------------------
-    st.subheader("📃 Contract", divider="gray")
+    st.subheader("Contract", divider="gray")
     st.caption(
         "Optional. If supplied, the extracted contract is upserted into the database.  "
         "A conflict with an existing record routes the invoice to EXCEPTION."
@@ -308,7 +330,7 @@ def _render_upload_tab() -> None:
     contract_text = _upload_widget("Contract", "contract")
 
     # ---- Process button ----------------------------------------------------
-    if st.button("🚀 Extract & Process", type="primary", disabled=not invoice_text):
+    if st.button("Extract and Process", type="primary", disabled=not invoice_text):
         if not invoice_text or not invoice_text.strip():
             st.warning("Please provide invoice text before processing.")
             return
@@ -355,7 +377,7 @@ def _render_submit_tab() -> None:
             tax_str = st.text_input("Tax *", value="20.00")
 
         st.subheader("Line Items")
-        st.caption("Enter one line item per row. Separate rows with the ➕ button.")
+        st.caption("Enter one line item per row. Separate rows with the Add button.")
         n_lines = st.number_input("Number of line items", min_value=1, max_value=10, value=2)
 
         line_data = []
@@ -386,7 +408,7 @@ def _render_submit_tab() -> None:
             help='e.g. "2/10 net 30" means 2% discount if paid within 10 days on net-30 terms.',
         )
 
-        submitted = st.form_submit_button("🚀 Submit Invoice", type="primary")
+        submitted = st.form_submit_button("Submit Invoice", type="primary")
 
     if submitted:
         # --- Build line items ---
@@ -509,14 +531,15 @@ def _render_submit_tab() -> None:
 # ---------------------------------------------------------------------------
 
 def render() -> None:
-    st.title("📋 Invoice Processing")
+    inject_theme()
+    st.title("Invoice Processing")
     st.markdown(
         "Submit an invoice for extraction, matching, routing, and scheduling.  "
         "Clean invoices are straight-through processed (STP); exceptions are "
         "routed to the human review queue."
     )
 
-    tab1, tab2 = st.tabs(["📤 Document Upload (LLM)", "🖊 Structured Submit (Form)"])
+    tab1, tab2 = st.tabs(["Document Upload (LLM)", "Structured Submit (Form)"])
 
     with tab1:
         _render_upload_tab()

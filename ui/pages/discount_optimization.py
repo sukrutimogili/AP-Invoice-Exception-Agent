@@ -29,6 +29,7 @@ from discount.parser import parse_discount_term
 from models.contract import DiscountTermSchema
 from models.enums import DiscountRecommendation
 from ui.components.badges import discount_badge
+from ui.components.theme import inject_theme
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +129,17 @@ def _render_formula_breakdown(
 
     hurdle_pct = float(hurdle_rate) * 100
     ann_pct = float(annualized_return) * 100
-    comparison = "≥" if annualized_return >= hurdle_rate else "<"
-    colour = "green" if annualized_return >= hurdle_rate else "red"
-    st.markdown(
-        f":{colour}[**{ann_pct:.2f}%** annualized return "
-        f"{comparison} **{hurdle_pct:.2f}%** hurdle rate]"
-    )
+    comparison = ">=" if annualized_return >= hurdle_rate else "<"
+    if annualized_return >= hurdle_rate:
+        st.success(
+            f"**{ann_pct:.2f}%** annualized return "
+            f"{comparison} **{hurdle_pct:.2f}%** hurdle rate — discount recommended"
+        )
+    else:
+        st.warning(
+            f"**{ann_pct:.2f}%** annualized return "
+            f"{comparison} **{hurdle_pct:.2f}%** hurdle rate — hold to net terms"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +147,8 @@ def _render_formula_breakdown(
 # ---------------------------------------------------------------------------
 
 def render() -> None:
-    st.title("💰 Discount Optimization")
+    inject_theme()
+    st.title("Discount Optimization")
     st.markdown(
         "Explore the early-payment discount calculator (FR-7).  "
         "All arithmetic is deterministic Python — no LLM involved (spec.md §5)."
@@ -191,7 +198,7 @@ def render() -> None:
     # -----------------------------------------------------------------------
     # Interactive calculator
     # -----------------------------------------------------------------------
-    st.subheader("🧮 Interactive Calculator")
+    st.subheader("Interactive Calculator")
 
     with st.form("discount_calc_form"):
         col1, col2 = st.columns(2)
@@ -228,7 +235,7 @@ def render() -> None:
                 help="The date the invoice is being evaluated (today by default).",
             )
 
-        calc_submitted = st.form_submit_button("📊 Calculate", type="primary")
+        calc_submitted = st.form_submit_button("Calculate", type="primary")
 
     if calc_submitted:
         # 1. Parse discount term
@@ -312,7 +319,7 @@ def render() -> None:
 
         # Formula breakdown (only when annualized return was computed)
         if rec.annualized_return is not None and parsed_term is not None:
-            with st.expander("📐 Formula Breakdown", expanded=True):
+            with st.expander("Formula Breakdown", expanded=True):
                 _render_formula_breakdown(
                     discount_pct=parsed_term.discount_pct,
                     net_days=parsed_term.net_days,

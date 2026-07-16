@@ -9,6 +9,11 @@ Features:
   - Filter by event type (outcome)
   - Expand each record to view complete payload
   - Status badges per event type
+  - Investigate button on EXCEPTION_RAISED events — calls the exception
+    triage agent and renders root cause, recommendation, confidence, and the
+    historical context it used directly above the approve/reject controls.
+    The human still clicks approve/reject themselves — the investigation result
+    is advisory only.
 """
 
 from __future__ import annotations
@@ -20,44 +25,53 @@ import streamlit as st
 
 import audit.writer as audit_writer
 from models.enums import AuditEventType
-from ui.components.badges import render_badge
+from ui.components.badges import AUDIT_EVENT_COLOURS, render_badge
+from ui.components.theme import inject_theme
 
 
 # ---------------------------------------------------------------------------
-# Event-type → badge colour mapping
+# Event-type → badge colour mapping  (sourced from badges.py palette)
 # ---------------------------------------------------------------------------
 
 _EVENT_COLOURS: dict[str, str] = {
-    AuditEventType.INVOICE_RECEIVED.value:        "#1565c0",
-    AuditEventType.EXTRACTION_SUCCEEDED.value:    "#2e7d32",
-    AuditEventType.EXTRACTION_FAILED.value:       "#b71c1c",
-    AuditEventType.MATCHING_COMPLETED.value:      "#4527a0",
-    AuditEventType.STP_APPROVED.value:            "#1e7e34",
-    AuditEventType.EXCEPTION_RAISED.value:        "#c0392b",
-    AuditEventType.HUMAN_OVERRIDE_APPROVED.value: "#0277bd",
-    AuditEventType.HUMAN_REJECTED.value:          "#880e4f",
-    AuditEventType.PAYMENT_SCHEDULED.value:       "#1b5e20",
-    AuditEventType.DISCOUNT_EVALUATED.value:      "#e65100",
+    **AUDIT_EVENT_COLOURS,
+    AuditEventType.INVESTIGATION_COMPLETED.value: "#4527A0",  # purple — agent output
 }
 
-_EVENT_ICONS: dict[str, str] = {
-    AuditEventType.INVOICE_RECEIVED.value:        "📥",
-    AuditEventType.EXTRACTION_SUCCEEDED.value:    "✅",
-    AuditEventType.EXTRACTION_FAILED.value:       "❌",
-    AuditEventType.MATCHING_COMPLETED.value:      "🔍",
-    AuditEventType.STP_APPROVED.value:            "💚",
-    AuditEventType.EXCEPTION_RAISED.value:        "⚠️",
-    AuditEventType.HUMAN_OVERRIDE_APPROVED.value: "👤",
-    AuditEventType.HUMAN_REJECTED.value:          "🚫",
-    AuditEventType.PAYMENT_SCHEDULED.value:       "💳",
-    AuditEventType.DISCOUNT_EVALUATED.value:      "💰",
+# Short text labels for each event type — no emoji
+_EVENT_LABELS: dict[str, str] = {
+    AuditEventType.INVOICE_RECEIVED.value:          "Received",
+    AuditEventType.EXTRACTION_SUCCEEDED.value:      "Extracted",
+    AuditEventType.EXTRACTION_FAILED.value:         "Extraction Failed",
+    AuditEventType.MATCHING_COMPLETED.value:        "Matched",
+    AuditEventType.STP_APPROVED.value:              "STP Approved",
+    AuditEventType.EXCEPTION_RAISED.value:          "Exception",
+    AuditEventType.HUMAN_OVERRIDE_APPROVED.value:   "Human Approved",
+    AuditEventType.HUMAN_REJECTED.value:            "Rejected",
+    AuditEventType.PAYMENT_SCHEDULED.value:         "Payment Scheduled",
+    AuditEventType.DISCOUNT_EVALUATED.value:        "Discount Evaluated",
+    AuditEventType.INVESTIGATION_COMPLETED.value:   "Agent Investigation",
+}
+
+# Confidence level → colour for the investigation result callout
+_CONFIDENCE_COLOURS: dict[str, str] = {
+    "high":   "#1A6B2A",   # green
+    "medium": "#B45309",   # amber
+    "low":    "#C0392B",   # red
+}
+
+# recommended_action → display label (plain text, no emoji)
+_ACTION_LABELS: dict[str, str] = {
+    "APPROVE_OVERRIDE":           "Approve with Override",
+    "REJECT":                     "Reject",
+    "REQUEST_CORRECTED_DOCUMENT": "Request Corrected Document",
+    "ESCALATE":                   "Escalate",
 }
 
 
 def _event_badge(event_type: str) -> str:
     colour = _EVENT_COLOURS.get(event_type, "#546e7a")
-    icon = _EVENT_ICONS.get(event_type, "•")
-    label = f"{icon} {event_type.replace('_', ' ').title()}"
+    label = _EVENT_LABELS.get(event_type, event_type.replace("_", " ").title())
     return render_badge(label, colour)
 
 
@@ -73,11 +87,158 @@ def _format_payload(payload_json: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Investigation result renderer
+# ---------------------------------------------------------------------------
+
+
+def _render_investigation_result(invoice_id: str) -> None:
+    """
+    Render the ExceptionInvestigation result stored in session state for invoice_id.
+
+    Shows root cause, recommendation badge, confidence, and supporting context
+    items.  Placed ABOVE the approve/reject controls so the reviewer sees the
+    triage analysis before acting.
+    """
+    result = st.session_state.get(f"investigation_{invoice_id}")
+    if result is None:
+        return
+
+    st.markdown("---")
+    st.markdown("#### Agent Investigation Result")
+    st.caption(
+        "This analysis was produced by the exception triage agent from exception data, "
+        "vendor history, and the audit trail.  It is advisory only — you retain full "
+        "authority to approve or reject."
+    )
+
+    # Root cause
+    st.markdown(f"**Root cause:** {result.root_cause_summary}")
+
+    # Recommendation badge
+    action = result.recommended_action
+    action_label = _ACTION_LABELS.get(action, action)
+    colour = {
+        "APPROVE_OVERRIDE": "#1A6B2A",
+        "REJECT": "#C0392B",
+        "REQUEST_CORRECTED_DOCUMENT": "#2563A8",
+        "ESCALATE": "#B45309",
+    }.get(action, "#4B5563")
+    st.markdown(
+        render_badge(f"Recommended: {action_label}", colour),
+        unsafe_allow_html=True,
+    )
+
+    # Confidence
+    conf = result.confidence
+    conf_colour = _CONFIDENCE_COLOURS.get(conf, "#4B5563")
+    st.markdown(
+        render_badge(f"Confidence: {conf.upper()}", conf_colour),
+        unsafe_allow_html=True,
+    )
+
+    # Supporting context
+    if result.supporting_context:
+        st.markdown("**Evidence used:**")
+        for item in result.supporting_context:
+            st.markdown(f"- {item}")
+
+    st.markdown("---")
+
+
+# ---------------------------------------------------------------------------
+# Exception action controls (approve / reject)
+# ---------------------------------------------------------------------------
+
+
+def _render_exception_controls(invoice_id: str) -> None:
+    """
+    Render the human approve/reject controls for an open exception.
+
+    These controls call the API endpoints; the actual business logic lives in
+    api/exceptions.py.  This is display-only wiring.
+    """
+    from api.exceptions import approve_exception, reject_exception
+    from models.exception_record import HumanResolutionUpdate
+    from models.enums import HumanAction
+
+    st.markdown("#### Human Review Controls")
+    st.caption(
+        "You are the decision-maker.  The agent recommendation above (if any) is advisory."
+    )
+
+    col_approve, col_reject = st.columns(2)
+
+    with col_approve:
+        actor_approve = st.text_input(
+            "Your identity (approver)",
+            key=f"actor_approve_{invoice_id}",
+            placeholder="e.g. jane.doe@company.com",
+        )
+        notes_approve = st.text_area(
+            "Override notes",
+            key=f"notes_approve_{invoice_id}",
+            placeholder="Reason for approving despite exception…",
+            height=80,
+        )
+        if st.button(
+            "Approve with Override",
+            key=f"approve_{invoice_id}",
+            type="primary",
+            disabled=not actor_approve.strip(),
+        ):
+            try:
+                from db.session import get_session
+                with get_session() as session:
+                    update = HumanResolutionUpdate(
+                        human_action=HumanAction.APPROVE_OVERRIDE,
+                        actor_id=actor_approve.strip(),
+                        resolution_notes=notes_approve.strip() or None,
+                    )
+                    approve_exception(invoice_id, update, session)
+                st.success(f"Invoice {invoice_id} approved with override by {actor_approve}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Approval failed: {exc}")
+
+    with col_reject:
+        actor_reject = st.text_input(
+            "Your identity (rejector)",
+            key=f"actor_reject_{invoice_id}",
+            placeholder="e.g. john.smith@company.com",
+        )
+        notes_reject = st.text_area(
+            "Rejection notes",
+            key=f"notes_reject_{invoice_id}",
+            placeholder="Reason for rejecting…",
+            height=80,
+        )
+        if st.button(
+            "Reject",
+            key=f"reject_{invoice_id}",
+            disabled=not actor_reject.strip(),
+        ):
+            try:
+                from db.session import get_session
+                with get_session() as session:
+                    update = HumanResolutionUpdate(
+                        human_action=HumanAction.REJECT,
+                        actor_id=actor_reject.strip(),
+                        resolution_notes=notes_reject.strip() or None,
+                    )
+                    reject_exception(invoice_id, update, session)
+                st.success(f"Invoice {invoice_id} rejected by {actor_reject}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Rejection failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
 
 def render() -> None:
-    st.title("📖 Audit Log")
+    inject_theme()
+    st.title("Audit Log")
     st.markdown(
         "Append-only audit trail for every invoice processed.  "
         "All state transitions are recorded here (FR-6.1)."
@@ -165,6 +326,23 @@ def render() -> None:
     # -----------------------------------------------------------------------
     # Event list — newest first
     # -----------------------------------------------------------------------
+    # Pre-compute which invoice IDs have been EXCEPTION_RAISED but not yet
+    # HUMAN_OVERRIDE_APPROVED or HUMAN_REJECTED (i.e. still open)
+    resolved_ids: set[str] = {
+        e["invoice_id"]
+        for e in all_events
+        if e.get("event_type") in (
+            AuditEventType.HUMAN_OVERRIDE_APPROVED.value,
+            AuditEventType.HUMAN_REJECTED.value,
+        )
+    }
+    exception_ids: set[str] = {
+        e["invoice_id"]
+        for e in all_events
+        if e.get("event_type") == AuditEventType.EXCEPTION_RAISED.value
+    }
+    open_exception_ids = exception_ids - resolved_ids
+
     for event in reversed(filtered):
         event_type = event.get("event_type", "UNKNOWN")
         invoice_id = event.get("invoice_id", "—")
@@ -175,9 +353,9 @@ def render() -> None:
         actor_id = event.get("actor_id") or "—"
 
         # Build a short summary line for the expander header
-        icon = _EVENT_ICONS.get(event_type, "•")
+        event_label = _EVENT_LABELS.get(event_type, event_type.replace("_", " ").title())
         header = (
-            f"{icon} **{event_type.replace('_', ' ').title()}** "
+            f"**{event_label}** "
             f"— Invoice `{invoice_number}` "
             f"· Vendor: {vendor_name} "
             f"· {created_at[:19] if created_at else ''}"
@@ -203,3 +381,44 @@ def render() -> None:
             st.markdown("**Payload:**")
             payload_str = _format_payload(event.get("payload_json"))
             st.code(payload_str, language="json")
+
+            # -------------------------------------------------------------------
+            # Investigate button — only on EXCEPTION_RAISED for open exceptions
+            # -------------------------------------------------------------------
+            if (
+                event_type == AuditEventType.EXCEPTION_RAISED.value
+                and invoice_id in open_exception_ids
+            ):
+                st.markdown("---")
+
+                # Show any previously computed investigation result first
+                _render_investigation_result(invoice_id)
+
+                # Investigate button — triggers the triage agent
+                investigate_key = f"investigate_{invoice_id}"
+                if st.button(
+                    "Investigate",
+                    key=investigate_key,
+                    help=(
+                        "Run the exception triage agent — analyses reason codes, "
+                        "vendor history, and the audit trail to produce a recommendation. "
+                        "The agent does not approve or reject; you do."
+                    ),
+                ):
+                    with st.spinner("Investigating exception — querying LLM…"):
+                        try:
+                            from agents.exception_triage_agent import (
+                                ExceptionInvestigation,
+                                InvestigationError,
+                                investigate_exception,
+                            )
+                            result = investigate_exception(invoice_id)
+                            st.session_state[f"investigation_{invoice_id}"] = result
+                            st.rerun()
+                        except InvestigationError as exc:
+                            st.error(f"Investigation failed: {exc}")
+                        except Exception as exc:
+                            st.error(f"Unexpected error during investigation: {exc}")
+
+                # Approve / reject controls (below investigation result, above divider)
+                _render_exception_controls(invoice_id)

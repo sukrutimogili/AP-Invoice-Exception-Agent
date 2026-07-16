@@ -31,7 +31,7 @@ When the UI uploads a PO or contract document alongside the invoice:
       with reason code DOCUMENT_CONFLICT.  The existing DB row is NOT
       overwritten.  A DOCUMENT_CONFLICT_DETECTED audit event is written with
       the field-level diff.  The diff is also stored on PipelineResult so the
-      UI can render the ⚠️ Document Conflict expander.
+      UI can render the Document Conflict expander.
 """
 
 from __future__ import annotations
@@ -65,6 +65,8 @@ from repositories.contract_repo import upsert_contract
 from repositories.po_repo import upsert_po
 from repositories.upsert_result import FieldDiff, UpsertConflict, UpsertCreated, UpsertUnchanged
 from repositories.vendor_repo import get_vendor_by_code, upsert_vendor
+from routing.decision import ExceptionDecision
+from services.exception_store import register_exception
 from services.invoice_service import InvoiceProcessingResult, run_pipeline
 
 
@@ -120,6 +122,15 @@ class PipelineResult:
     # "extraction succeeded".  A non-None value is always user-readable.
     po_extraction_warning: str | None = None
     contract_extraction_warning: str | None = None
+
+    # Low-confidence fields — populated when invoice extraction succeeded but one
+    # or more fields were flagged "low" confidence by the LLM.  The invoice is
+    # routed to EXCEPTION (LOW_CONFIDENCE_EXTRACTION) so a human can verify the
+    # values before proceeding to STP.
+    # Shape: {field_name: extracted_value_as_string}
+    # None means no low-confidence fields were reported (or extraction failed
+    # before this check was reached).
+    low_confidence_fields: dict[str, str] | None = None
 
     processed_at: str = ""
     error_message: str | None = None  # user-friendly; never a stack trace
@@ -212,6 +223,46 @@ def _diff_to_serialisable(diff: dict[str, FieldDiff]) -> dict[str, dict[str, Any
             "incoming": str(v.incoming) if v.incoming is not None else None}
         for k, v in diff.items()
     }
+
+
+def _collect_low_confidence_fields(
+    extraction: ExtractionSuccess,
+    invoice: InvoiceCreate,
+) -> dict[str, str] | None:
+    """
+    Inspect field_confidence on a successful ExtractionSuccess.
+
+    Returns a dict mapping each "low"-confidence field name to its extracted
+    value (as a human-readable string), or None if all fields are high-confidence
+    (including the default when field_confidence is empty).
+
+    The value representation is best-effort — the goal is to give a human
+    reviewer enough context to confirm or correct the reading.  Structured
+    fields (line_items) are rendered compactly.
+    """
+    low_fields = {
+        k: v
+        for k, v in extraction.field_confidence.items()
+        if v == "low"
+    }
+    if not low_fields:
+        return None
+
+    # Build a flat value map from the invoice for display.
+    invoice_dict = _invoice_to_dict(invoice)
+    result: dict[str, str] = {}
+
+    for field_name in low_fields:
+        if field_name in invoice_dict:
+            val = invoice_dict[field_name]
+            result[field_name] = str(val) if val is not None else "(null)"
+        elif field_name.startswith("line_items["):
+            # e.g. "line_items[0].unit_price"
+            result[field_name] = "(see line items)"
+        else:
+            result[field_name] = "(unknown field)"
+
+    return result or None
 
 
 from dataclasses import dataclass as _dc
@@ -371,6 +422,7 @@ def _from_service_result(
     contract_conflict_diff: dict[str, dict[str, Any]] | None = None,
     po_extraction_warning: str | None = None,
     contract_extraction_warning: str | None = None,
+    low_confidence_fields: dict[str, str] | None = None,
 ) -> PipelineResult:
     """Convert a service-layer result to a PipelineResult for the UI."""
     return PipelineResult(
@@ -388,6 +440,7 @@ def _from_service_result(
         contract_conflict_diff=contract_conflict_diff,
         po_extraction_warning=po_extraction_warning,
         contract_extraction_warning=contract_extraction_warning,
+        low_confidence_fields=low_confidence_fields,
         processed_at=result.processed_at,
     )
 
@@ -404,7 +457,27 @@ def _make_conflict_pipeline_result(
     """
     Build a EXCEPTION/DOCUMENT_CONFLICT PipelineResult without running the
     full pipeline.  Called when upsert returns UpsertConflict.
+    Registers the exception in the store so the dashboard and API see it.
     """
+    conflict_record = ExceptionRecordCreate(
+        invoice_id=invoice_id,
+        reasons=[
+            ExceptionReasonSchema(
+                reason_code=ExceptionReasonCode.DOCUMENT_CONFLICT,
+                supporting_data={
+                    "po_conflict": po_conflict_diff or {},
+                    "contract_conflict": contract_conflict_diff or {},
+                },
+            )
+        ],
+        status=ExceptionStatus.OPEN,
+    )
+    register_exception(
+        ExceptionDecision(
+            invoice_id=invoice_id,
+            exception_record=conflict_record,
+        )
+    )
     return PipelineResult(
         invoice_id=invoice_id,
         invoice_number=invoice.invoice_number,
@@ -577,6 +650,64 @@ def run_extraction_pipeline_with_documents(
     assert isinstance(invoice_extraction, ExtractionSuccess)
     invoice = invoice_extraction.invoice
     audit_writer.write_extraction_succeeded(invoice_id=invoice_id, result=invoice_extraction)
+
+    # -----------------------------------------------------------------------
+    # 1b. Low-confidence gate — short-circuit to EXCEPTION before any DB work
+    #
+    # If the LLM flagged any field as "low" confidence, route immediately to
+    # EXCEPTION with reason LOW_CONFIDENCE_EXTRACTION.  The extracted values
+    # ARE returned (via invoice_fields and low_confidence_fields) so the human
+    # reviewer can see exactly what the LLM read and confirm or correct each
+    # flagged field before the invoice can proceed to STP.
+    #
+    # This is additive to the existing null/missing-field behaviour:
+    #   null field  → field genuinely absent from the document (no confidence flag)
+    #   "low"       → field found, reading uncertain — must be human-verified
+    # -----------------------------------------------------------------------
+    low_confidence = _collect_low_confidence_fields(invoice_extraction, invoice)
+    if low_confidence:
+        lc_exception_record = ExceptionRecordCreate(
+            invoice_id=invoice_id,
+            reasons=[
+                ExceptionReasonSchema(
+                    reason_code=ExceptionReasonCode.LOW_CONFIDENCE_EXTRACTION,
+                    supporting_data={
+                        "low_confidence_fields": low_confidence,
+                        "note": (
+                            "One or more fields were extracted with low confidence. "
+                            "The values shown come directly from the document but the "
+                            "reading is uncertain. Please verify before approving."
+                        ),
+                    },
+                )
+            ],
+            status=ExceptionStatus.OPEN,
+        )
+        audit_writer.write_invoice_received(
+            invoice_id=invoice_id,
+            invoice_number=invoice.invoice_number,
+        )
+        audit_writer.write_exception_raised(
+            invoice_id=invoice_id,
+            invoice=invoice,
+            exception_record=lc_exception_record,
+        )
+        # Register in the exception store so the dashboard and API can see it.
+        register_exception(
+            ExceptionDecision(
+                invoice_id=invoice_id,
+                exception_record=lc_exception_record,
+            )
+        )
+        return PipelineResult(
+            invoice_id=invoice_id,
+            invoice_number=invoice.invoice_number,
+            outcome="EXCEPTION",
+            exception_reasons=[ExceptionReasonCode.LOW_CONFIDENCE_EXTRACTION.value],
+            invoice_fields=_invoice_to_dict(invoice),
+            low_confidence_fields=low_confidence,
+            processed_at=processed_at,
+        )
 
     # -----------------------------------------------------------------------
     # 2. Extract PO (optional, non-blocking)

@@ -1,0 +1,38 @@
+# .streamlit/config.toml — LedgerGate-Agent UI theme
+#
+# Design intent:
+#   A deep navy→electric blue→near-white gradient runs as a fixed CSS
+#   background on the outer app container (injected via theme.py).  All
+#   actual content — cards, tables, forms, metrics — sits on solid
+#   near-white (#FAFBFF) card surfaces with a soft shadow so the gradient
+#   reads as ambient depth, never as the surface text sits on.
+#
+#   The most saturated part of the gradient is reserved for the hero band
+#   behind each page title (h1) so rich colour appears where there is no
+#   dense data to read through.
+#
+# Palette:
+#   Gradient stops  #050B1A (deep navy) → #1E5FD9 (electric blue) → #F0F4FF (near-white)
+#   Card surface    #FAFBFF  — primary content background
+#   Page bg         #F0F4FF  — lightest gradient stop, shown where no card overlaps
+#   Sidebar bg      #0D1B3E  — dark navy; sourced from the darkest gradient stop
+#   Text            #0D1B3E  — dark navy on light surfaces (~13:1 on #FAFBFF, WCAG AAA)
+#   Primary accent  #1E5FD9  — electric blue (matches mid-gradient) on interactive
+#                              elements: buttons, sliders, links, checkbox ticks
+#
+# Contrast audit (WCAG):
+#   #0D1B3E on #FAFBFF → ~13.8:1  ✓ AAA (normal and large text)
+#   #0D1B3E on #F0F4FF → ~12.7:1  ✓ AAA
+#   #FFFFFF on #1E5FD9 →  ~4.7:1  ✓ AA  (button/badge text on blue)
+#   #FFFFFF on #050B1A → ~19.2:1  ✓ AAA (sidebar text on deep navy)
+#
+# Badge pills (defined in ui/components/badges.py) carry their own
+# background + white text and are self-contained; they are not affected
+# by this config change.
+
+[theme]
+base                     = "light"
+backgroundColor          = "#F0F4FF"
+secondaryBackgroundColor = "#FAFBFF"
+primaryColor             = "#1E5FD9"
+textColor                = "#0D1B3E"
