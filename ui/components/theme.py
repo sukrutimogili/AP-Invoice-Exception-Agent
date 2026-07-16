@@ -5,33 +5,28 @@ component-surface CSS for LedgerGate-Agent.
 Design model
 ------------
 The gradient IS the page surface.  Page titles, section headers, body text,
-and empty space all sit directly on the gradient.  No white wrapper wraps the
-full content column.
+and empty space all sit directly on the gradient with white/light text.
+No white wrapper wraps the full content column.
 
-White/light surfaces are applied only to discrete data-bearing components
-whose content requires a stable reading background:
-  - Individual KPI metric cards
-  - Forms
-  - Expanders (collapsible detail panels)
-  - Dataframes / tables
-  - Alert boxes
-  - Tab panels
+Gradient: 135° dark navy → mid navy → royal blue → electric blue.
+Stays dark throughout — no light or near-white corner anywhere.
+  #04060F  0%   — near-black navy (top-left)
+  #0B1A3E  35%  — deep navy
+  #14357A  65%  — mid royal blue
+  #1E5FD9  100% — electric blue (bottom-right)
 
-Everything else — headings, descriptive text, dividers, spacing — renders
-directly on the gradient with white/light text.
+Typography tiers:
+  Outfit 800   — page titles only           (h1 / st.title)
+  Outfit 700   — section/card headers       (h2, h3 / st.subheader)
+  Inter  400   — all body text, captions    (p, li, labels, captions)
+  Inter  600   — inline emphasis / KPI labels inside cards
 
-Layering
---------
-  [data-testid="stAppViewContainer"]  carries the gradient (145° navy→blue→near-white)
-  .block-container                    transparent — gradient shows through
-  st.metric / st.form / st.expander   white card surfaces, subtle shadow
-  Text on gradient                    white (#FFFFFF) or near-white (#E8EEFF)
-  Text on white cards                 navy (#0D1B3E)
+White/light surfaces applied only to discrete data components:
+  KPI metric cards, forms, expanders, dataframes, alert boxes, tab panels.
+  Interior text on those cards: Outfit headings → navy, Inter body → navy.
 
-Nav bar pill (navbar.py)
-------------------------
-  position: fixed, top: 20px, margin: 0 auto, white pill, real drop shadow,
-  fully rounded — gradient visible on all four sides.
+Everything else (headings, descriptions, dividers, empty space) renders
+directly on the gradient with white text.
 
 Call inject_theme() once at the top of every page render() before any st.*
 content calls.  Re-injection is idempotent.
@@ -44,22 +39,27 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Design tokens
 # ---------------------------------------------------------------------------
-_NAVY_DEEP      = "#050B1A"
-_NAVY_MID       = "#0D1B3E"
-_BLUE_ELECTRIC  = "#1E5FD9"
-_NEAR_WHITE     = "#F0F4FF"
-_CARD_SURFACE   = "#FFFFFF"
-_CARD_SHADOW    = "0 2px 12px rgba(5, 11, 26, 0.14), 0 1px 3px rgba(5, 11, 26, 0.08)"
-_CARD_BORDER    = "1px solid rgba(30, 95, 217, 0.12)"
+# Gradient stops — 135°, all dark, no light corner
+_GRAD_0   = "#04060F"   # near-black navy    0%
+_GRAD_35  = "#0B1A3E"   # deep navy         35%
+_GRAD_65  = "#14357A"   # royal blue        65%
+_GRAD_100 = "#1E5FD9"   # electric blue    100%
 
-# Text on the gradient background
-_TEXT_ON_GRAD   = "#FFFFFF"          # page titles, headings on gradient
-_TEXT_MUTED     = "rgba(255,255,255,0.75)"   # captions / secondary on gradient
+_NAVY_DEEP      = "#050B1A"   # sidebar darkest stop
+_NAVY_MID       = "#0D1B3E"   # sidebar lighter stop / card text
+_BLUE_ELECTRIC  = "#1E5FD9"   # primary accent (buttons, focus rings)
+
+_CARD_SURFACE   = "#FFFFFF"
+_CARD_SHADOW    = "0 2px 16px rgba(4, 6, 15, 0.28), 0 1px 4px rgba(4, 6, 15, 0.16)"
+_CARD_BORDER    = "1px solid rgba(30, 95, 217, 0.14)"
+
+# Text on the gradient (dark background everywhere)
+_TEXT_ON_GRAD   = "#FFFFFF"
+_TEXT_MUTED     = "rgba(255, 255, 255, 0.68)"
 
 # Text on white card surfaces
 _TEXT_ON_CARD   = _NAVY_MID
-
-_TEXT_ON_DARK   = "#FFFFFF"          # inside sidebar
+_TEXT_ON_DARK   = "#FFFFFF"   # sidebar
 
 # ---------------------------------------------------------------------------
 # CSS
@@ -68,9 +68,10 @@ _TEXT_ON_DARK   = "#FFFFFF"          # inside sidebar
 _THEME_CSS = f"""
 <style>
 /* ── 0. Google Fonts ─────────────────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+/* Outfit for headings (700/800), Inter for body (400/600)                   */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@700;800&family=Inter:wght@400;600&display=swap');
 
-/* ── 1. Universal font family ────────────────────────────────────────────── */
+/* ── 1. Universal font family — Inter for everything by default ──────────── */
 html, body, [class*="css"],
 .stApp, .stMarkdown, .stText, .stCaption,
 .stDataFrame, .stMetric, .stSelectbox,
@@ -81,18 +82,22 @@ div[data-testid="stSidebar"],
 div[data-testid="stAppViewContainer"],
 div[data-testid="stVerticalBlock"] {{
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+    font-weight: 400;
 }}
 
 /* ── 2. Gradient on the outermost container ──────────────────────────────── */
+/* 4-stop gradient stays in dark navy-to-royal-blue range throughout —       */
+/* no light/near-white corner anywhere on the page.                          */
 [data-testid="stAppViewContainer"] {{
     background: linear-gradient(
-        145deg,
-        {_NAVY_DEEP}     0%,
-        {_BLUE_ELECTRIC} 42%,
-        {_NEAR_WHITE}    100%
+        135deg,
+        #04060F  0%,
+        #0B1A3E  35%,
+        #14357A  65%,
+        #1E5FD9  100%
     ) !important;
     background-attachment: fixed !important;
-    min-height: 100vh !important;
+    /* No min-height: 100vh — container sizes to content, no dead space */
 }}
 
 /* Everything above stAppViewContainer is transparent */
@@ -107,7 +112,6 @@ div[data-testid="stVerticalBlock"] {{
 }}
 
 /* ── 3. Main content column — TRANSPARENT, gradient shows directly ───────── */
-/* This is the key change: no white wrapper around the whole page.            */
 .main .block-container,
 .block-container,
 div[data-testid="stMainBlockContainer"] {{
@@ -119,39 +123,62 @@ div[data-testid="stMainBlockContainer"] {{
     padding-bottom: 3rem !important;
 }}
 
-/* ── 4. Typography on gradient — white / near-white text ────────────────── */
+/* ── 4. Typography — font families and weights (no colour here) ──────────── */
+/* Colours are set per-surface below (gradient context vs card context).     */
+/* Setting color globally with !important is what caused white-on-white.     */
 
-/* Inter 800 — page titles directly on gradient */
+/* Outfit 800 — page titles */
 h1,
 div[data-testid="stHeadingWithActionElements"] h1 {{
+    font-family: 'Outfit', sans-serif !important;
     font-weight: 800 !important;
     letter-spacing: -0.02em !important;
-    color: {_TEXT_ON_GRAD} !important;
-    text-shadow: 0 1px 4px rgba(5, 11, 26, 0.4) !important;
 }}
 
-/* Inter 600 — section headers on gradient */
+/* Outfit 700 — section headers */
 h2, h3,
 div[data-testid="stHeadingWithActionElements"] h2,
 div[data-testid="stHeadingWithActionElements"] h3 {{
-    font-weight: 600 !important;
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 700 !important;
     letter-spacing: -0.01em !important;
-    color: {_TEXT_ON_GRAD} !important;
-    text-shadow: 0 1px 3px rgba(5, 11, 26, 0.3) !important;
 }}
 
-/* Inter 400 — body text and captions on gradient */
+/* Inter 400 — body, captions */
 p, li, .stMarkdown p {{
+    font-family: 'Inter', sans-serif !important;
     font-weight: 400 !important;
-    color: {_TEXT_ON_GRAD} !important;
 }}
 
 .stCaption, small {{
-    color: {_TEXT_MUTED} !important;
+    font-family: 'Inter', sans-serif !important;
     font-weight: 400 !important;
 }}
 
-/* Dividers on gradient — white with low opacity */
+/* ── 4b. Gradient context — white text on dark background ────────────────── */
+/* Scoped to the transparent column that sits directly on the gradient.      */
+/* Does NOT apply inside stMetric / stForm / stExpander / stTabContent /     */
+/* stDataFrame — those are white cards and get navy text below.              */
+.block-container > div > div > div > p,
+.block-container > div > div > div > li,
+.block-container .stMarkdown:not([data-testid="stExpander"] .stMarkdown):not([data-testid="stForm"] .stMarkdown):not([data-testid="stTabContent"] .stMarkdown) p {{
+    color: {_TEXT_ON_GRAD} !important;
+}}
+
+/* Headings directly on gradient (not inside a card container) */
+.block-container > div > div > div h1,
+.block-container > div > div > div h2,
+.block-container > div > div > div h3 {{
+    color: {_TEXT_ON_GRAD} !important;
+    text-shadow: 0 1px 4px rgba(4, 6, 15, 0.45) !important;
+}}
+
+/* Captions and small text on gradient */
+.block-container .stCaption:not([data-testid="stExpander"] .stCaption):not([data-testid="stForm"] .stCaption) {{
+    color: {_TEXT_MUTED} !important;
+}}
+
+/* Dividers on gradient */
 hr {{
     border-color: rgba(255, 255, 255, 0.18) !important;
 }}
@@ -165,18 +192,17 @@ div[data-testid="stMetric"] {{
     box-shadow: {_CARD_SHADOW} !important;
 }}
 
-/* Metric text on white card — navy */
-div[data-testid="stMetric"] label,
-label[data-testid="stMetricLabel"],
+div[data-testid="stMetric"] *,
+div[data-testid="stMetricLabel"],
 div[data-testid="stMetricValue"],
-div[data-testid="stMetricDelta"] {{
+div[data-testid="stMetricDelta"],
+label[data-testid="stMetricLabel"] {{
     color: {_TEXT_ON_CARD} !important;
-    font-weight: 600 !important;
+    text-shadow: none !important;
 }}
 
-div[data-testid="stMetricValue"] {{
-    font-weight: 800 !important;
-}}
+div[data-testid="stMetricLabel"] {{ font-weight: 600 !important; font-family: 'Inter', sans-serif !important; }}
+div[data-testid="stMetricValue"] {{ font-weight: 800 !important; font-family: 'Inter', sans-serif !important; }}
 
 /* ── 6. Forms — discrete white surface ───────────────────────────────────── */
 div[data-testid="stForm"] {{
@@ -187,18 +213,13 @@ div[data-testid="stForm"] {{
     box-shadow: {_CARD_SHADOW} !important;
 }}
 
-/* Form interior text — navy on white */
-div[data-testid="stForm"] p,
-div[data-testid="stForm"] label,
-div[data-testid="stForm"] .stMarkdown p {{
+div[data-testid="stForm"] *:not(input):not(textarea):not(button):not(select) {{
     color: {_TEXT_ON_CARD} !important;
     text-shadow: none !important;
 }}
 
-div[data-testid="stForm"] h2,
-div[data-testid="stForm"] h3 {{
-    color: {_TEXT_ON_CARD} !important;
-    text-shadow: none !important;
+div[data-testid="stForm"] h1, div[data-testid="stForm"] h2, div[data-testid="stForm"] h3 {{
+    font-family: 'Outfit', sans-serif !important;
 }}
 
 /* ── 7. Expanders — discrete white surface ───────────────────────────────── */
@@ -209,19 +230,23 @@ div[data-testid="stExpander"] {{
     box-shadow: {_CARD_SHADOW} !important;
 }}
 
-div[data-testid="stExpander"] summary p,
-div[data-testid="stExpander"] p,
-div[data-testid="stExpander"] label,
-div[data-testid="stExpander"] h2,
-div[data-testid="stExpander"] h3 {{
+div[data-testid="stExpander"] *:not(input):not(textarea):not(button):not(select) {{
     color: {_TEXT_ON_CARD} !important;
     text-shadow: none !important;
-    font-weight: 600 !important;
 }}
 
-div[data-testid="stExpander"] .stMarkdown p {{
-    color: {_TEXT_ON_CARD} !important;
-    text-shadow: none !important;
+div[data-testid="stExpander"] summary p,
+div[data-testid="stExpander"] h2,
+div[data-testid="stExpander"] h3 {{
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 700 !important;
+}}
+
+div[data-testid="stExpander"] p,
+div[data-testid="stExpander"] li,
+div[data-testid="stExpander"] td,
+div[data-testid="stExpander"] th {{
+    font-family: 'Inter', sans-serif !important;
     font-weight: 400 !important;
 }}
 
@@ -235,15 +260,16 @@ div[data-testid="stDataFrame"],
     border: {_CARD_BORDER} !important;
 }}
 
-/* ── 9. Alert boxes — discrete surface ───────────────────────────────────── */
+/* ── 9. Alert boxes — readable text regardless of background ─────────────── */
 div[data-testid="stAlert"] {{
     border-radius: 8px !important;
     border-left-width: 4px !important;
 }}
 
-/* Alert text — keep Streamlit's semantic colours, just ensure readability */
-div[data-testid="stAlert"] p {{
-    color: inherit !important;
+/* Override global white rule — Streamlit's alert colouring handles fg */
+div[data-testid="stAlert"] p,
+div[data-testid="stAlert"] span,
+div[data-testid="stAlert"] div {{
     text-shadow: none !important;
 }}
 
@@ -257,7 +283,7 @@ div[data-testid="stTabs"] [role="tablist"] {{
 }}
 
 div[data-testid="stTabs"] [role="tab"] {{
-    color: rgba(255, 255, 255, 0.75) !important;
+    color: rgba(255, 255, 255, 0.80) !important;
     font-weight: 600 !important;
     padding: 0.6rem 1rem !important;
 }}
@@ -277,12 +303,15 @@ div[data-testid="stTabContent"] {{
     box-shadow: {_CARD_SHADOW} !important;
 }}
 
-/* Tab content interior text — navy on white */
-div[data-testid="stTabContent"] p,
-div[data-testid="stTabContent"] label,
-div[data-testid="stTabContent"] .stMarkdown p {{
+div[data-testid="stTabContent"] *:not(input):not(textarea):not(button):not(select) {{
     color: {_TEXT_ON_CARD} !important;
     text-shadow: none !important;
+}}
+
+div[data-testid="stTabContent"] h1,
+div[data-testid="stTabContent"] h2,
+div[data-testid="stTabContent"] h3 {{
+    font-family: 'Outfit', sans-serif !important;
 }}
 
 /* ── 11. Input widgets — white surface, navy text ─────────────────────────── */
@@ -309,17 +338,41 @@ div[data-testid="stTabContent"] .stMarkdown p {{
 .stDateInput label,
 .stRadio label,
 .stCheckbox label,
-.stFileUploader label {{
+.stFileUploader label,
+.stSlider label {{
     color: {_TEXT_ON_GRAD} !important;
     text-shadow: none !important;
 }}
 
-/* Selectbox / number input interior */
+/* Selectbox — all child text (selected value renders as span/div, not p) */
+div[data-testid="stSelectbox"],
 div[data-testid="stSelectbox"] > div,
-div[data-testid="stNumberInput"] input {{
+div[data-testid="stSelectbox"] > div > div,
+div[data-testid="stSelectbox"] span,
+div[data-testid="stSelectbox"] input {{
     background: {_CARD_SURFACE} !important;
     color: {_TEXT_ON_CARD} !important;
     border-radius: 6px !important;
+}}
+
+/* Number input */
+div[data-testid="stNumberInput"] input,
+div[data-testid="stNumberInput"] span {{
+    background: {_CARD_SURFACE} !important;
+    color: {_TEXT_ON_CARD} !important;
+    border-radius: 6px !important;
+}}
+
+/* Date input */
+div[data-testid="stDateInput"] input {{
+    background: {_CARD_SURFACE} !important;
+    color: {_TEXT_ON_CARD} !important;
+}}
+
+/* Radio and checkbox option text — white on gradient */
+div[data-testid="stRadio"] span,
+div[data-testid="stCheckbox"] span {{
+    color: {_TEXT_ON_GRAD} !important;
 }}
 
 /* ── 12. Sidebar — deep navy gradient rail ────────────────────────────────── */
