@@ -19,6 +19,7 @@ from audit.writer import (
     write_matching_completed,
     write_payment_scheduled,
     write_stp_approved,
+    write_vendor_auto_created,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "write_matching_completed",
     "write_payment_scheduled",
     "write_stp_approved",
+    "write_vendor_auto_created",
 ]

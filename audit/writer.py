@@ -534,3 +534,43 @@ def write_discount_evaluated(
             ),
         )
     )
+
+
+
+def write_vendor_auto_created(
+    invoice_id: str,
+    vendor_code: str,
+    vendor_name: str,
+    created_vendor_id: str,
+    source_document: str,
+) -> AuditEventRead:
+    """
+    Write VENDOR_AUTO_CREATED — a new vendor row was auto-created because the
+    vendor code extracted from a PO or Contract document was not present in the
+    vendor master table.
+
+    This event must only be written AFTER the containing session.commit() has
+    succeeded.  If the transaction is rolled back, no event should exist (the
+    audit trail must not claim a vendor exists that isn't durable in the DB).
+
+    Args:
+        invoice_id:       Stable ID of the invoice being processed.
+        vendor_code:      The vendor code extracted from the source document.
+        vendor_name:      The vendor name used when creating the row.
+        created_vendor_id: The UUID assigned to the newly created VendorORM row.
+        source_document:  "PO" or "Contract" — identifies which document triggered
+                          the auto-creation.
+    """
+    return _append(
+        AuditEventCreate(
+            invoice_id=invoice_id,
+            event_type=AuditEventType.VENDOR_AUTO_CREATED,
+            payload_json=_payload(
+                vendor_code=vendor_code,
+                vendor_name=vendor_name,
+                created_vendor_id=created_vendor_id,
+                source_document=source_document,
+                reason="Vendor code not previously known",
+            ),
+        )
+    )

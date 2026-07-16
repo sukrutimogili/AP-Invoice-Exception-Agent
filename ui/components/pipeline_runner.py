@@ -60,11 +60,11 @@ from models.exception_record import ExceptionReasonSchema, ExceptionRecordCreate
 from models.enums import ExceptionStatus
 from models.invoice import InvoiceCreate
 from models.purchase_order import PurchaseOrderCreate
-from models.vendor import VendorCreate
+from models.vendor import VendorCreate, VendorORM
 from repositories.contract_repo import upsert_contract
 from repositories.po_repo import upsert_po
 from repositories.upsert_result import FieldDiff, UpsertConflict, UpsertCreated, UpsertUnchanged
-from repositories.vendor_repo import get_vendor_by_code
+from repositories.vendor_repo import get_vendor_by_code, upsert_vendor
 from services.invoice_service import InvoiceProcessingResult, run_pipeline
 
 
@@ -212,6 +212,155 @@ def _diff_to_serialisable(diff: dict[str, FieldDiff]) -> dict[str, dict[str, Any
             "incoming": str(v.incoming) if v.incoming is not None else None}
         for k, v in diff.items()
     }
+
+
+from dataclasses import dataclass as _dc
+
+
+@_dc(frozen=True)
+class _VendorResolution:
+    """
+    Result of resolving-or-creating a vendor by code within a session.
+
+    vendor_id      — the vendors.id UUID to use as the FK on PO/Contract rows.
+    was_created    — True if a new vendor row was just INSERTed in this call;
+                     False if an existing row was found.  Only when was_created
+                     is True should the caller write a VENDOR_AUTO_CREATED audit
+                     event — and only AFTER the enclosing session.commit() has
+                     succeeded.
+    vendor_code    — echoed back for use in the audit event payload.
+    vendor_name    — echoed back for use in the audit event payload.
+    warning        — non-None only when vendor resolution failed (UpsertConflict
+                     or unexpected result); the PO/Contract upsert should be
+                     skipped and this message surfaced to the user.
+    """
+    vendor_id: str | None
+    was_created: bool
+    vendor_code: str
+    vendor_name: str
+    warning: str | None
+
+
+def _resolve_or_create_vendor(
+    session,
+    vendor_code: str,
+    vendor_name: str,
+    source_document: str,
+) -> _VendorResolution:
+    """
+    Look up a vendor by code; auto-create if absent.
+
+    1. Call get_vendor_by_code(session, vendor_code).
+       - Found → query VendorORM by vendor_code to get the UUID; return it
+         with was_created=False.
+    2. Not found → construct VendorCreate and call upsert_vendor().
+       - UpsertCreated → query VendorORM to get the new UUID; return it with
+         was_created=True.
+       - Anything else (UpsertConflict, etc.) → return warning, vendor_id=None.
+
+    The caller is responsible for:
+      - Only writing the VENDOR_AUTO_CREATED audit event AFTER the enclosing
+        session.commit() has succeeded (was_created=True signals this).
+      - Skipping the PO/Contract upsert when warning is non-None.
+
+    Notes on UUID retrieval:
+      VendorCreate (returned by get_vendor_by_code and upsert_vendor) does NOT
+      carry the `id` field — that lives on VendorORM.  After confirming the
+      vendor exists or was created, this function re-queries VendorORM by
+      vendor_code to get the authoritative UUID.
+
+    Args:
+        session:         Active SQLAlchemy Session (caller owns commit/rollback).
+        vendor_code:     Vendor code extracted from the document.
+        vendor_name:     Vendor name to use if auto-creating.
+        source_document: "PO" or "Contract" — for warning messages only.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    def _get_vendor_id(vc: str) -> str | None:
+        """Re-query VendorORM to get the UUID for vendor_code=vc."""
+        row = (
+            session.query(VendorORM)
+            .filter(VendorORM.vendor_code == vc)
+            .first()
+        )
+        return row.id if row is not None else None
+
+    # ── 1. Try existing row ──────────────────────────────────────────────────
+    existing = get_vendor_by_code(session, vendor_code)
+    if existing is not None:
+        vid = _get_vendor_id(vendor_code)
+        if vid is None:
+            # Should never happen — vendor was just found
+            return _VendorResolution(
+                vendor_id=None,
+                was_created=False,
+                vendor_code=vendor_code,
+                vendor_name=vendor_name,
+                warning=(
+                    f"{source_document} vendor '{vendor_code}' found by code but UUID "
+                    f"could not be retrieved — possible data integrity issue."
+                ),
+            )
+        return _VendorResolution(
+            vendor_id=vid,
+            was_created=False,
+            vendor_code=vendor_code,
+            vendor_name=vendor_name,
+            warning=None,
+        )
+
+    # ── 2. Not found — auto-create ───────────────────────────────────────────
+    _log.info(
+        "Vendor not found — auto-creating",
+        extra={"vendor_code": vendor_code, "source_document": source_document},
+    )
+    from models.vendor import VendorCreate as _VendorCreate
+    new_vendor = _VendorCreate(
+        vendor_code=vendor_code,
+        name=vendor_name,
+        is_active=True,
+        contact_email=None,
+        notes=(
+            f"Auto-created from {source_document} upload "
+            f"— vendor_code not previously known"
+        ),
+    )
+    result = upsert_vendor(session, new_vendor)
+    if isinstance(result, UpsertCreated):
+        vid = _get_vendor_id(vendor_code)
+        if vid is None:
+            return _VendorResolution(
+                vendor_id=None,
+                was_created=False,
+                vendor_code=vendor_code,
+                vendor_name=vendor_name,
+                warning=(
+                    f"{source_document} vendor '{vendor_code}' was inserted but UUID "
+                    f"could not be retrieved — skipping {source_document} upsert."
+                ),
+            )
+        return _VendorResolution(
+            vendor_id=vid,
+            was_created=True,
+            vendor_code=vendor_code,
+            vendor_name=vendor_name,
+            warning=None,
+        )
+
+    # Unexpected result (UpsertConflict, UpsertUnchanged race, etc.)
+    return _VendorResolution(
+        vendor_id=None,
+        was_created=False,
+        vendor_code=vendor_code,
+        vendor_name=vendor_name,
+        warning=(
+            f"{source_document} vendor '{vendor_code}' could not be resolved or "
+            f"auto-created (upsert returned {type(result).__name__}) "
+            f"— {source_document} not persisted."
+        ),
+    )
 
 
 def _from_service_result(
@@ -499,38 +648,39 @@ def run_extraction_pipeline_with_documents(
     resolved_po: PurchaseOrderCreate | None = None
     resolved_contract: ContractCreate | None = None
 
+    # Hoisted above try so it remains accessible in the deferred-audit block
+    # below (which is outside the try/except).
+    _deferred_vendor_audits: list[tuple[str, _VendorResolution, str]] = []
+
     try:
         with get_session() as session:
+            # Collect (invoice_id, vendor_resolution) pairs for audit events
+            # that must be written AFTER the commit succeeds.
+            _deferred_vendor_audits = []
+            # Each tuple: (invoice_id, resolution, source_document_label)
+
             # --- PO upsert ---
             if extracted_po is not None:
-                # Resolve the vendor UUID from the extracted vendor code.
-                # The extraction agent sets po.vendor_id to the raw vendor code
-                # string from the document (e.g. "ACME-001"), NOT a DB UUID.
-                # We must replace it with the real vendors.id before writing.
-                po_to_upsert = extracted_po
-                if extracted_po_vendor_code:
-                    vendor_row = get_vendor_by_code(session, extracted_po_vendor_code)
-                    if vendor_row is None:
-                        # Vendor not in master — warn but do not block; upsert is
-                        # skipped so the row never lands with a broken FK.
-                        po_extraction_warning = (
-                            po_extraction_warning
-                            or f"PO vendor '{extracted_po_vendor_code}' not found in vendor "
-                               f"master — PO not persisted. Add the vendor first."
-                        )
-                        po_to_upsert = None
-                    else:
-                        # Replace the placeholder vendor_id with the real UUID.
-                        po_to_upsert = extracted_po.model_copy(
-                            update={"vendor_id": vendor_row.id}
-                        )
+                po_vendor_name = extracted_po_vendor_code or ""
+                vr = _resolve_or_create_vendor(
+                    session,
+                    vendor_code=extracted_po_vendor_code or "",
+                    vendor_name=po_vendor_name,
+                    source_document="PO",
+                )
+                if vr.warning:
+                    po_extraction_warning = po_extraction_warning or vr.warning
+                    po_to_upsert = None
+                else:
+                    po_to_upsert = extracted_po.model_copy(
+                        update={"vendor_id": vr.vendor_id}
+                    )
 
                 if po_to_upsert is not None:
                     po_result = upsert_po(session, po_to_upsert)
                     if isinstance(po_result, UpsertConflict):
                         raw_diff = _diff_to_serialisable(po_result.diff)
                         po_conflict_diff = raw_diff
-                        # Write audit event before returning.
                         audit_writer.write_document_conflict_detected(
                             invoice_id=invoice_id,
                             invoice=invoice,
@@ -538,28 +688,33 @@ def run_extraction_pipeline_with_documents(
                             natural_key=extracted_po.po_number,
                             diff=raw_diff,
                         )
+                        # Do not commit — vendor auto-create is also rolled back
                     elif isinstance(po_result, (UpsertCreated, UpsertUnchanged)):
                         resolved_po = po_result.record
-                        session.commit()
+                        session.commit()  # commits vendor (if new) + PO together
+                        if vr.was_created:
+                            _deferred_vendor_audits.append(
+                                (invoice_id, vr, "PO")
+                            )
 
             # --- Contract upsert ---
             if extracted_contract is not None:
-                # Same vendor-resolution requirement as PO: replace the raw
-                # vendor code placeholder with the real vendors.id UUID.
-                contract_to_upsert = extracted_contract
-                if extracted_contract_vendor_code:
-                    vendor_row = get_vendor_by_code(session, extracted_contract_vendor_code)
-                    if vendor_row is None:
-                        contract_extraction_warning = (
-                            contract_extraction_warning
-                            or f"Contract vendor '{extracted_contract_vendor_code}' not found "
-                               f"in vendor master — contract not persisted. Add the vendor first."
-                        )
-                        contract_to_upsert = None
-                    else:
-                        contract_to_upsert = extracted_contract.model_copy(
-                            update={"vendor_id": vendor_row.id}
-                        )
+                contract_vendor_name = extracted_contract_vendor_code or ""
+                vr = _resolve_or_create_vendor(
+                    session,
+                    vendor_code=extracted_contract_vendor_code or "",
+                    vendor_name=contract_vendor_name,
+                    source_document="Contract",
+                )
+                if vr.warning:
+                    contract_extraction_warning = (
+                        contract_extraction_warning or vr.warning
+                    )
+                    contract_to_upsert = None
+                else:
+                    contract_to_upsert = extracted_contract.model_copy(
+                        update={"vendor_id": vr.vendor_id}
+                    )
 
                 if contract_to_upsert is not None:
                     contract_result = upsert_contract(
@@ -577,10 +732,18 @@ def run_extraction_pipeline_with_documents(
                             natural_key=extracted_contract.contract_reference,
                             diff=raw_diff,
                         )
+                        # Do not commit — vendor auto-create is also rolled back
                     elif isinstance(contract_result, (UpsertCreated, UpsertUnchanged)):
                         resolved_contract = contract_result.record
-                        session.commit()
+                        session.commit()  # commits vendor (if new) + Contract together
+                        if vr.was_created:
+                            _deferred_vendor_audits.append(
+                                (invoice_id, vr, "Contract")
+                            )
 
+    # Write deferred vendor-auto-created audit events now that the DB
+    # transaction has committed successfully.  These are outside the
+    # try/except so a failed audit write doesn't mask the real error.
     except Exception as exc:
         return PipelineResult(
             invoice_id=invoice_id,
@@ -589,6 +752,18 @@ def run_extraction_pipeline_with_documents(
             error_message=f"DB upsert failed: {type(exc).__name__}: {exc}",
             invoice_fields=_invoice_to_dict(invoice),
             processed_at=processed_at,
+        )
+
+    # Flush deferred VENDOR_AUTO_CREATED audit events.
+    # These are written only after a successful session.commit() so the
+    # audit trail never claims a vendor exists that wasn't durably persisted.
+    for _inv_id, _vr, _src_doc in _deferred_vendor_audits:
+        audit_writer.write_vendor_auto_created(
+            invoice_id=_inv_id,
+            vendor_code=_vr.vendor_code,
+            vendor_name=_vr.vendor_name,
+            created_vendor_id=_vr.vendor_id,
+            source_document=_src_doc,
         )
 
     # -----------------------------------------------------------------------
