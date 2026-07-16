@@ -406,7 +406,22 @@ class ExtractionAgent(BaseExtractionAgent[InvoiceCreate, ExtractionResult]):
     def _make_success(
         self, model: InvoiceCreate, raw: str, attempt: int
     ) -> ExtractionSuccess:
-        return ExtractionSuccess(invoice=model, raw_payload=raw, attempt_count=attempt)
+        import json as _json
+        try:
+            raw_dict = _json.loads(raw)
+            fc_raw = raw_dict.get("field_confidence") or {}
+            # Keep only "high" / "low" entries; ignore any other values.
+            field_confidence = {
+                k: v for k, v in fc_raw.items() if v in ("high", "low")
+            }
+        except Exception:
+            field_confidence = {}
+        return ExtractionSuccess(
+            invoice=model,
+            raw_payload=raw,
+            attempt_count=attempt,
+            field_confidence=field_confidence,
+        )
 
     def _make_failure(
         self,
@@ -467,19 +482,26 @@ class PurchaseOrderExtractionAgent(
     ) -> "POExtractionSuccess":
         from extraction.po_schemas import POExtractionSuccess
 
-        # Re-read vendor_code_extracted from the raw payload.
+        # Re-read vendor_code_extracted and field_confidence from the raw payload.
         import json as _json
 
         try:
-            vendor_code = _json.loads(raw).get("vendor_code", "")
+            raw_dict = _json.loads(raw)
+            vendor_code = raw_dict.get("vendor_code", "")
+            fc_raw = raw_dict.get("field_confidence") or {}
+            field_confidence = {
+                k: v for k, v in fc_raw.items() if v in ("high", "low")
+            }
         except Exception:
-            vendor_code = model.vendor_id  # fallback
+            vendor_code = model.vendor_id
+            field_confidence = {}
 
         return POExtractionSuccess(
             po=model,
             vendor_code_extracted=vendor_code or model.vendor_id,
             raw_payload=raw,
             attempt_count=attempt,
+            field_confidence=field_confidence,
         )
 
     def _make_failure(
@@ -551,9 +573,14 @@ class ContractExtractionAgent(
             raw_dict = _json.loads(raw)
             vendor_code = raw_dict.get("vendor_code", "")
             discount_term_raw = raw_dict.get("discount_term_raw")
+            fc_raw = raw_dict.get("field_confidence") or {}
+            field_confidence = {
+                k: v for k, v in fc_raw.items() if v in ("high", "low")
+            }
         except Exception:
             vendor_code = model.vendor_id
             discount_term_raw = None
+            field_confidence = {}
 
         return ContractExtractionSuccess(
             contract=model,
@@ -561,6 +588,7 @@ class ContractExtractionAgent(
             discount_term_raw=discount_term_raw,
             raw_payload=raw,
             attempt_count=attempt,
+            field_confidence=field_confidence,
         )
 
     def _make_failure(

@@ -45,7 +45,10 @@ set its value to null — do NOT invent or infer a value.
       "qty": "number — ordered quantity",
       "unit_price": "number — unit price (plain number, no currency symbols)"
     }
-  ]
+  ],
+  "field_confidence": {
+    "<field_name>": "\"high\" | \"low\""
+  }
 }
 ```
 
@@ -82,6 +85,31 @@ set its value to null — do NOT invent or infer a value.
    invent a plausible value.
 4. line_items must be an array. If there are no visible line items, set it to [].
 5. Return only the JSON object — nothing else.
+6. Include the field_confidence object (see below) — omit keys for fields you read without any doubt.
+
+## FIELD CONFIDENCE
+
+The `field_confidence` object lets you flag fields where the value is present in the document
+but genuinely ambiguous — for example: a monetary total stated in an unusual format, a quantity
+near other numbers with unclear labelling, or an approval threshold whose scope is unclear.
+
+Rules for `field_confidence`:
+- Emit only entries for fields whose reading you are uncertain about.
+- Do NOT emit an entry for fields that are clearly and unambiguously stated.
+- A "low" entry still requires the value to come directly from the document — this is NOT
+  permission to guess.  If a field is truly absent, set it to null and do not emit a
+  confidence entry for it.
+- Valid values are `"high"` and `"low"`.  Omitting a field from `field_confidence` is
+  equivalent to `"high"`.
+- Use the same key names as the top-level fields (e.g. `"po_total"`, `"unit_price"`).
+  For line-item fields, use the form `"line_items[0].unit_price"` (0-based index).
+
+Examples of when to emit `"low"` confidence:
+- `po_total` is printed in a format like "12.500,00" (European comma-decimal) — you read it
+  as 12500.00 but the format was non-standard.
+- `approval_threshold` appears near the po_total with ambiguous column headers and it is
+  unclear which number is the threshold.
+- A line-item `unit_price` is stated adjacent to a rebate column and the labelling is unclear.
 
 ## PO DOCUMENT TEXT TO EXTRACT
 

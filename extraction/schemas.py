@@ -38,6 +38,15 @@ class FailureReason(str, Enum):
     MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
 
 
+# Confidence level for a single extracted field.
+# "high"  — value is clearly and unambiguously present in the document.
+# "low"   — value was found but the reading is uncertain (unusual format,
+#           ambiguous labelling, value near other numbers, etc.).  The
+#           extracted value still comes directly from the document — "low"
+#           is not permission to guess.
+ConfidenceLevel = Literal["high", "low"]
+
+
 class ExtractionSuccess(BaseModel):
     """Successful extraction — carries a fully-validated InvoiceCreate."""
 
@@ -52,6 +61,16 @@ class ExtractionSuccess(BaseModel):
         ge=1,
         le=2,
         description="1 = succeeded on first attempt; 2 = succeeded after retry.",
+    )
+    field_confidence: dict[str, ConfidenceLevel] = Field(
+        default_factory=dict,
+        description=(
+            "Per-field confidence reported by the LLM.  Keys are field names "
+            "(e.g. 'grand_total', 'unit_price').  A missing key means the LLM "
+            "did not flag that field — treat as implicitly 'high'.  "
+            "'low' means the value was present but the reading was uncertain; "
+            "the value still comes from the document, never invented."
+        ),
     )
 
 

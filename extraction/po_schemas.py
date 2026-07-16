@@ -49,9 +49,10 @@ from models.enums import ExtractionStatus
 from models.purchase_order import PurchaseOrderCreate
 
 # Re-export FailureReason — same codes apply for any document type.
-from extraction.schemas import FailureReason
+from extraction.schemas import ConfidenceLevel, FailureReason
 
 __all__ = [
+    "ConfidenceLevel",
     "FailureReason",
     "POExtractionFailure",
     "POExtractionResult",
@@ -105,6 +106,16 @@ class POExtractionSuccess(BaseModel):
         ge=1,
         le=2,
         description="1 = first attempt succeeded; 2 = succeeded after retry.",
+    )
+    field_confidence: dict[str, ConfidenceLevel] = Field(
+        default_factory=dict,
+        description=(
+            "Per-field confidence reported by the LLM.  Keys are field names "
+            "(e.g. 'po_total', 'unit_price').  A missing key means the LLM "
+            "did not flag that field — treat as implicitly 'high'.  "
+            "'low' means the value was present but the reading was uncertain; "
+            "the value still comes from the document, never invented."
+        ),
     )
 
 

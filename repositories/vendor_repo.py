@@ -30,7 +30,7 @@ from repositories.upsert_result import (
     UpsertUnchanged,
 )
 
-__all__ = ["get_vendor_by_code", "get_vendor_by_id", "upsert_vendor"]
+__all__ = ["get_vendor_by_code", "get_vendor_by_id", "list_vendors", "upsert_vendor"]
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +66,26 @@ def get_vendor_by_code(session: Session, vendor_code: str) -> VendorCreate | Non
     if row is None:
         return None
     return VendorCreate.model_validate(row)
+
+
+def list_vendors(session: Session) -> list[VendorCreate]:
+    """
+    Return all vendor rows from the vendor master table.
+
+    Used by agents and dashboards that need to iterate over every vendor —
+    e.g. the vendor risk agent (agents/vendor_risk_agent.py).
+
+    Returns an empty list if no vendors exist yet.  Never raises on an empty
+    table.
+
+    Args:
+        session: Active SQLAlchemy Session.
+
+    Returns:
+        List of VendorCreate objects, one per row, in no guaranteed order.
+    """
+    rows: list[VendorORM] = session.query(VendorORM).all()
+    return [VendorCreate.model_validate(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------

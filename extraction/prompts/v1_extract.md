@@ -51,7 +51,10 @@ its value to null — do NOT invent or infer a value.
       "unit_price": "number — price per unit",
       "amount": "number — line total (qty × unit_price)"
     }
-  ]
+  ],
+  "field_confidence": {
+    "<field_name>": "\"high\" | \"low\""
+  }
 }
 ```
 
@@ -63,6 +66,37 @@ its value to null — do NOT invent or infer a value.
 4. line_items must be an array; if there are no line items visible, set it to an empty array.
 5. If grand_total is missing from the source, set it to null — do NOT compute it from line items.
 6. Return only the JSON object — nothing else.
+7. Include the field_confidence object (see below) — omit keys for fields you read without any doubt.
+
+## FIELD CONFIDENCE
+
+The `field_confidence` object lets you flag fields where the value is present in the document
+but genuinely ambiguous — for example: a number stated in an unusual format, a value near
+other numbers with unclear labelling, or a date where the day/month order is not obvious from
+context.
+
+Rules for `field_confidence`:
+- Emit only entries for fields whose reading you are uncertain about.
+- Do NOT emit an entry for fields that are clearly and unambiguously stated.
+- A "low" entry still requires the value to come directly from the document — this is NOT
+  permission to guess.  If a field is truly absent, set it to null and do not emit a
+  confidence entry for it at all.
+- Valid values are `"high"` and `"low"`.  Omitting a field from `field_confidence` is
+  equivalent to `"high"`.
+- Use the same key names as the top-level fields (e.g. `"grand_total"`, `"unit_price"`).
+  For line-item fields, use the form `"line_items[0].unit_price"` (0-based index).
+
+Examples of when to emit `"low"` confidence:
+- `grand_total` is stated as "USD 1.250,00" (European comma-decimal format) — you read it
+  as 1250.00 but the format was non-standard.
+- `due_date` could be read as either 2026-04-05 or 2026-05-04 from "04/05/2026" without
+  locale context.
+- A `unit_price` is printed near a discount column and it is unclear which number is the
+  actual unit price.
+
+Examples where you MUST NOT emit `"low"` (the field is simply absent):
+- `grand_total` is not printed on the invoice at all → set to null, no confidence entry.
+- `contract_reference` is not mentioned → set to null, no confidence entry.
 
 ## INVOICE TEXT TO EXTRACT
 

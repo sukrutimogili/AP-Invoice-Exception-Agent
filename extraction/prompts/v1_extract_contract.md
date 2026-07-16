@@ -44,7 +44,10 @@ set its value to null — do NOT invent or infer a value.
       "description": "string — item or service description exactly as printed",
       "unit_price": "number — contracted unit price (plain number, no currency symbols)"
     }
-  ]
+  ],
+  "field_confidence": {
+    "<field_name>": "\"high\" | \"low\""
+  }
 }
 ```
 
@@ -97,6 +100,33 @@ set its value to null — do NOT invent or infer a value.
    Do NOT compute numeric breakdowns from the term string.
 5. line_items must be an array. If there are no visible line items, set it to [].
 6. Return only the JSON object — nothing else.
+7. Include the field_confidence object (see below) — omit keys for fields you read without any doubt.
+
+## FIELD CONFIDENCE
+
+The `field_confidence` object lets you flag fields where the value is present in the document
+but genuinely ambiguous — for example: a unit price stated in an unusual format, a number near
+other numbers with unclear column headers, or a discount term whose percentage or days are
+difficult to parse unambiguously.
+
+Rules for `field_confidence`:
+- Emit only entries for fields whose reading you are uncertain about.
+- Do NOT emit an entry for fields that are clearly and unambiguously stated.
+- A "low" entry still requires the value to come directly from the document — this is NOT
+  permission to guess.  If a field is truly absent, set it to null and do not emit a
+  confidence entry for it.
+- Valid values are `"high"` and `"low"`.  Omitting a field from `field_confidence` is
+  equivalent to `"high"`.
+- Use the same key names as the top-level fields (e.g. `"approval_threshold"`, `"unit_price"`).
+  For line-item fields, use the form `"line_items[0].unit_price"` (0-based index).
+
+Examples of when to emit `"low"` confidence:
+- A line-item `unit_price` is printed next to a "list price" and a "net price" column and
+  it is unclear which one is the contracted price.
+- `approval_threshold` is stated as "up to EUR 50.000" — the period could be a thousands
+  separator (50000) or a decimal point (50.000).
+- `discount_term_raw` is partially obscured or uses non-standard phrasing that could be
+  interpreted multiple ways (e.g. "2% within ten 10 days net 30 days").
 
 ## CONTRACT DOCUMENT TEXT TO EXTRACT
 
