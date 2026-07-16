@@ -451,6 +451,46 @@ def write_payment_scheduled(
     )
 
 
+def write_document_conflict_detected(
+    invoice_id: str,
+    invoice: InvoiceCreate,
+    document_type: str,
+    natural_key: str,
+    diff: dict[str, Any],
+) -> AuditEventRead:
+    """
+    Write DOCUMENT_CONFLICT_DETECTED — an uploaded PO or contract conflicts
+    with the row already stored in the database for the same natural key.
+
+    No write is performed to the PO/contract table; this event records that
+    the conflict was observed and the invoice has been routed to EXCEPTION
+    with reason code DOCUMENT_CONFLICT.
+
+    Args:
+        invoice_id:    Stable ID for the invoice being processed.
+        invoice:       The validated InvoiceCreate (for correlation fields).
+        document_type: "PO" or "CONTRACT".
+        natural_key:   The conflicting key (po_number or contract_reference).
+        diff:          Field-level diff dict {field_name: {"existing": x, "incoming": y}}.
+                       Serialised verbatim into the payload_json for audit trail.
+    """
+    return _append(
+        AuditEventCreate(
+            invoice_id=invoice_id,
+            event_type=AuditEventType.DOCUMENT_CONFLICT_DETECTED,
+            invoice_number=invoice.invoice_number,
+            vendor_name=invoice.vendor_name,
+            po_reference=invoice.po_reference,
+            payload_json=_payload(
+                document_type=document_type,
+                natural_key=natural_key,
+                conflicting_fields=list(diff.keys()),
+                diff=diff,
+            ),
+        )
+    )
+
+
 def write_discount_evaluated(
     invoice_id: str,
     invoice: InvoiceCreate,

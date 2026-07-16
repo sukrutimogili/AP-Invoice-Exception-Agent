@@ -25,9 +25,13 @@ Rate limiting:
   reverse-proxy layer in production — not implemented in-process in v1.
 
 File validation (spec.md §4):
-  - Accepted content-types: text/plain, application/octet-stream, text/csv.
-  - Maximum file size: 1 MB (1_048_576 bytes).
-  - Content decoded as UTF-8; decode errors raise HTTP 422.
+  - Accepted content-types: text/plain, application/pdf, application/octet-stream, text/csv.
+    A generic content-type (application/octet-stream) is also accepted when the filename
+    ends in .pdf — actual format is verified by extraction.document_loader.
+  - Maximum file size: 1 MB (1_048_576 bytes) of raw upload bytes.
+  - Text (.txt): decoded as UTF-8; decode errors raise HTTP 422.
+  - PDF (.pdf): text extracted with pdfplumber; scanned/image-only PDFs and corrupt
+    files raise HTTP 422 with a specific reason (not a generic decode error).
 """
 
 from __future__ import annotations
@@ -42,7 +46,10 @@ from pydantic import BaseModel, Field
 
 import audit.writer as audit
 from app.config import get_settings
+from db.resolver import resolve_invoice_entities
+from db.session import get_session
 from extraction.agent import ExtractionAgent
+from extraction.document_loader import DocumentLoadError, load_document_text
 from extraction.llm_client import OpenRouterClient
 from extraction.schemas import ExtractionFailure, ExtractionSuccess
 from models.contract import ContractCreate
@@ -65,6 +72,16 @@ _ACCEPTED_CONTENT_TYPES: frozenset[str] = frozenset([
     "text/plain",
     "application/octet-stream",
     "text/csv",
+    "application/pdf",
+])
+
+# Generic binary content-types that browsers / HTTP clients sometimes send
+# instead of the real MIME type.  When one of these is the declared type AND
+# the filename extension is .pdf we treat the upload as a PDF rather than
+# rejecting it — the actual format is verified by load_document_text().
+_GENERIC_CONTENT_TYPES: frozenset[str] = frozenset([
+    "application/octet-stream",
+    "binary/octet-stream",
 ])
 
 
@@ -81,34 +98,41 @@ class InvoiceSubmitRequest(BaseModel):
     """
     Request body for POST /invoices/submit.
 
-    Carries a pre-extracted InvoiceCreate alongside optional mock context
-    (PO, contract, vendor) for Phase 9 in-process resolution.
+    Carries a pre-extracted InvoiceCreate.  Entity resolution (vendor, PO,
+    contract) is performed automatically from the database using the reference
+    fields on the invoice:
+      - po_reference        → PurchaseOrderORM by po_number
+      - contract_reference  → ContractORM by contract_reference
+      - vendor              → resolved via PO.vendor_id FK (not by name)
 
-    TBD: replace mock_* fields with DB resolution via FastAPI Depends once
-         a DB session is wired in — see spec.md §3 (Dependency injection).
+    The three override_* fields are provided for testing and integration
+    scenarios where the caller wants to supply entities directly without a DB
+    round-trip.  When supplied they take precedence over DB resolution.
+    Set override_vendor=None (omit) to use DB resolution (default).
     """
 
     invoice: InvoiceCreate = Field(description="Pre-extracted, fully-validated invoice.")
 
-    mock_vendor: VendorCreate | None = Field(
+    override_vendor: VendorCreate | None = Field(
         default=None,
         description=(
-            "Mock vendor record.  If omitted the engine raises UNKNOWN_VENDOR.  "
-            "Replace with DB lookup in production."
+            "Optional vendor override.  When supplied, DB resolution is skipped "
+            "for the vendor.  Intended for tests and integration scenarios."
         ),
     )
-    mock_po: PurchaseOrderCreate | None = Field(
+    override_po: PurchaseOrderCreate | None = Field(
         default=None,
         description=(
-            "Mock purchase order.  If omitted the engine raises PO_NOT_FOUND.  "
-            "Replace with DB lookup in production."
+            "Optional PO override.  When supplied, DB resolution is skipped "
+            "for the PO (and consequently for the vendor, unless override_vendor "
+            "is also set).  Intended for tests and integration scenarios."
         ),
     )
-    mock_contract: ContractCreate | None = Field(
+    override_contract: ContractCreate | None = Field(
         default=None,
         description=(
-            "Mock contract.  If omitted the engine raises CONTRACT_NOT_FOUND.  "
-            "Replace with DB lookup in production."
+            "Optional contract override.  When supplied, DB resolution is skipped "
+            "for the contract.  Intended for tests and integration scenarios."
         ),
     )
     approval_on_file: bool = Field(
@@ -193,13 +217,54 @@ def submit_invoice(body: InvoiceSubmitRequest) -> InvoiceSubmitResponse:
     """
     invoice_id = body.invoice_id or str(uuid.uuid4())
 
+    # -----------------------------------------------------------------------
+    # Entity resolution — DB first, override fields take precedence.
+    #
+    # Resolution strategy (see db/resolver.py):
+    #   PO by invoice.po_reference → vendor by PO.vendor_id FK
+    #   Contract by invoice.contract_reference
+    #
+    # If override_* fields are supplied they bypass DB resolution for that
+    # entity.  This is intentional: tests and integration callers can supply
+    # known-good entities directly without a running database.
+    # -----------------------------------------------------------------------
+    try:
+        if body.override_po is None or body.override_contract is None:
+            with get_session() as session:
+                entities = resolve_invoice_entities(session, body.invoice)
+        else:
+            # All three overrides supplied — skip the DB entirely.
+            from db.resolver import ResolvedEntities
+            entities = ResolvedEntities(
+                vendor=body.override_vendor,
+                po=body.override_po,
+                contract=body.override_contract,
+            )
+    except Exception as exc:
+        logger.error(
+            "DB entity resolution failed in /invoices/submit",
+            extra={"invoice_id": invoice_id, "error": str(exc)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Entity resolution failed for invoice_id={invoice_id!r}: {exc!s}"
+            ),
+        ) from exc
+
+    # Allow individual override fields to replace DB-resolved entities.
+    vendor = body.override_vendor if body.override_vendor is not None else entities.vendor
+    po     = body.override_po     if body.override_po     is not None else entities.po
+    contract = body.override_contract if body.override_contract is not None else entities.contract
+
     try:
         result = run_pipeline(
             invoice_id=invoice_id,
             invoice=body.invoice,
-            vendor=body.mock_vendor,
-            po=body.mock_po,
-            contract=body.mock_contract,
+            vendor=vendor,
+            po=po,
+            contract=contract,
             approval_on_file=body.approval_on_file,
         )
     except Exception as exc:
@@ -225,7 +290,7 @@ def submit_invoice(body: InvoiceSubmitRequest) -> InvoiceSubmitResponse:
     status_code=status.HTTP_201_CREATED,
     summary="Upload a raw invoice document for extraction and processing",
     description=(
-        "Accepts a plain-text invoice document (max 1 MB, UTF-8) via "
+        "Accepts a plain-text or PDF invoice document (max 1 MB raw) via "
         "multipart/form-data (field name: `file`).  Runs LLM extraction "
         "(spec.md §1 model-portability rule), then routes the extracted "
         "invoice through matching → routing → audit → payment scheduling → "
@@ -233,9 +298,12 @@ def submit_invoice(body: InvoiceSubmitRequest) -> InvoiceSubmitResponse:
         "If extraction fails, `outcome='NEEDS_REEXTRACTION'` with "
         "`extraction_failure_reason` populated (FR-5.1).\n\n"
         "**File validation (spec.md §4):**\n"
-        "- Accepted: text/plain, application/octet-stream, text/csv.\n"
-        "- Max size: 1 MB.\n"
-        "- Must be valid UTF-8.\n\n"
+        "- Accepted: text/plain, application/pdf, application/octet-stream, text/csv.\n"
+        "  A generic content-type (application/octet-stream) is also accepted when the "
+        "  filename ends in `.pdf`.\n"
+        "- Max size: 1 MB (raw upload bytes).\n"
+        "- `.txt` files must be valid UTF-8.\n"
+        "- `.pdf` files must have an embedded text layer; scanned/image PDFs → HTTP 422.\n\n"
         "**Rate limiting:** 30 uploads/min per client IP at proxy (spec.md §4).\n\n"
         "**Authorization (TBD — Phase 9):** internal service token required."
     ),
@@ -244,7 +312,7 @@ def submit_invoice(body: InvoiceSubmitRequest) -> InvoiceSubmitResponse:
 async def upload_invoice(
     file: UploadFile = File(
         ...,
-        description="Plain-text invoice document (UTF-8, max 1 MB).",
+        description="Plain-text (.txt, UTF-8) or PDF (.pdf, text layer required) invoice document, max 1 MB.",
     ),
 ) -> InvoiceSubmitResponse:
     """
@@ -253,17 +321,42 @@ async def upload_invoice(
     Authorization: internal service token (TBD — see spec.md §4 / Phase 9).
     Rate limiting: 30 uploads/min per client IP at proxy (spec.md §4).
 
+    File validation:
+        - Accepted content-types: text/plain, application/pdf,
+          application/octet-stream, text/csv.  A generic content-type
+          (application/octet-stream) is also accepted when the filename
+          ends in .pdf.
+        - Max raw upload size: 1 MB (1_048_576 bytes).
+        - Text files decoded as UTF-8; PDF files require an embedded text
+          layer (scanned/image-only PDFs are rejected with a specific reason).
+
     Raises:
         413: file exceeds 1 MB.
-        415: unsupported content type.
-        422: file is not valid UTF-8.
+        415: unsupported content type (not text/plain, application/pdf,
+             application/octet-stream, or text/csv).
+        422: document cannot be loaded — invalid UTF-8, scanned/image PDF,
+             corrupt PDF, or unsupported file type.
         500: unexpected pipeline error.
     """
     # -----------------------------------------------------------------------
     # File validation — spec.md §4
     # -----------------------------------------------------------------------
     content_type = (file.content_type or "application/octet-stream").split(";")[0].strip()
-    if content_type not in _ACCEPTED_CONTENT_TYPES:
+    filename = file.filename or ""
+    filename_lower = filename.lower()
+
+    # Determine whether to accept this upload.
+    #
+    # Rule 1 — explicit PDF content-type is accepted directly.
+    # Rule 2 — generic binary content-type is accepted when the filename
+    #           ends in .pdf: some HTTP clients (curl --data-binary, certain
+    #           proxies) send application/octet-stream regardless of extension.
+    #           load_document_text() will verify the actual format.
+    # Rule 3 — everything else must be in _ACCEPTED_CONTENT_TYPES.
+    is_pdf_by_extension = (
+        content_type in _GENERIC_CONTENT_TYPES and filename_lower.endswith(".pdf")
+    )
+    if content_type not in _ACCEPTED_CONTENT_TYPES and not is_pdf_by_extension:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=(
@@ -279,12 +372,23 @@ async def upload_invoice(
             detail=f"File exceeds {_MAX_FILE_BYTES:,} bytes (1 MB).",
         )
 
+    # Resolve the effective content-type to pass to load_document_text().
+    # When a generic type was accepted because the filename ends in .pdf,
+    # override to application/pdf so load_document_text() uses the PDF path.
+    effective_content_type = (
+        "application/pdf" if is_pdf_by_extension else content_type
+    )
+
     try:
-        invoice_text = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
+        invoice_text = load_document_text(
+            raw_bytes,
+            filename=filename,
+            content_type=effective_content_type,
+        )
+    except DocumentLoadError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"File is not valid UTF-8: {exc!s}",
+            detail=exc.message,
         ) from exc
 
     invoice_id = str(uuid.uuid4())
@@ -292,7 +396,7 @@ async def upload_invoice(
         "Invoice upload received",
         extra={
             "invoice_id": invoice_id,
-            "filename": file.filename,
+            "upload_filename": file.filename,
             "content_type": content_type,
             "size_bytes": len(raw_bytes),
         },
@@ -336,17 +440,37 @@ async def upload_invoice(
     audit.write_extraction_succeeded(invoice_id=invoice_id, result=extraction_result)
 
     # -----------------------------------------------------------------------
-    # Downstream pipeline — delegates to the service layer
+    # Entity resolution — look up vendor, PO, and contract from the DB.
     #
-    # TBD: resolve vendor/PO/contract from DB via FastAPI Depends.
+    # Resolution strategy (mirrors submit_invoice and pipeline_runner):
+    #   PO by invoice.po_reference → vendor by PO.vendor_id FK
+    #   Contract by invoice.contract_reference
+    #
+    # Any entity that cannot be resolved is None; the matching engine will
+    # raise the appropriate exception reason code rather than crashing.
     # -----------------------------------------------------------------------
+    try:
+        with get_session() as session:
+            entities = resolve_invoice_entities(session, extraction_result.invoice)
+    except Exception as exc:
+        logger.error(
+            "DB entity resolution failed in /invoices/upload",
+            extra={"invoice_id": invoice_id, "error": str(exc)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Entity resolution failed for invoice_id={invoice_id!r}: {exc!s}"
+            ),
+        ) from exc
     try:
         result = run_pipeline(
             invoice_id=invoice_id,
             invoice=extraction_result.invoice,
-            vendor=None,    # TBD: resolve from DB by invoice.vendor_name
-            po=None,        # TBD: resolve from DB by invoice.po_reference
-            contract=None,  # TBD: resolve from DB by invoice.contract_reference
+            vendor=entities.vendor,
+            po=entities.po,
+            contract=entities.contract,
             approval_on_file=False,
         )
     except Exception as exc:

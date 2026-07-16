@@ -34,6 +34,7 @@ from ui.components.badges import (
 from ui.components.pipeline_runner import (
     PipelineResult,
     run_extraction_pipeline,
+    run_extraction_pipeline_with_documents,
     run_submit_pipeline,
 )
 from models.contract import ContractCreate, ContractLineItemCreate, DiscountTermSchema
@@ -154,59 +155,156 @@ def _render_result(result: PipelineResult) -> None:
                 "to resolve this exception."
             )
 
+        # --- Document Conflict diff (rendered separately, always expanded) ---
+        if result.po_conflict_diff:
+            _render_conflict_diff("PO", result.po_conflict_diff)
+
+        if result.contract_conflict_diff:
+            _render_conflict_diff("Contract", result.contract_conflict_diff)
+
+
+# ---------------------------------------------------------------------------
+# Document conflict diff renderer
+# ---------------------------------------------------------------------------
+
+
+def _render_conflict_diff(doc_type: str, diff: dict) -> None:
+    """
+    Render a ⚠️ Document Conflict expander showing every disagreeing field.
+
+    Args:
+        doc_type: "PO" or "Contract" (display label only).
+        diff:     dict[field_name, {"existing": str, "incoming": str}]
+    """
+    with st.expander(f"⚠️ Document Conflict — {doc_type}", expanded=True):
+        st.warning(
+            f"The uploaded **{doc_type}** document disagrees with the record "
+            f"already stored in the database.  The existing row has **not** been "
+            f"overwritten.  A human reviewer must approve or reject this invoice "
+            f"before any changes take effect."
+        )
+        st.markdown("**Fields that differ:**")
+
+        import pandas as pd
+
+        rows = []
+        for field_name, values in diff.items():
+            rows.append(
+                {
+                    "Field": field_name,
+                    "Stored (existing)": values.get("existing", "—") or "—",
+                    "Uploaded (incoming)": values.get("incoming", "—") or "—",
+                }
+            )
+        if rows:
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.markdown("_(no field-level detail available)_")
+
 
 # ---------------------------------------------------------------------------
 # Mode 1 — Document Upload (LLM extraction)
 # ---------------------------------------------------------------------------
 
-def _render_upload_tab() -> None:
-    st.markdown(
-        "Upload a plain-text invoice document. The system will extract all fields "
-        "using the LLM extraction pipeline, then run matching and routing."
-    )
-    st.caption("⚠️ Requires a valid `OPENROUTER_API_KEY` in your `.env` file.")
+
+def _upload_widget(label: str, key_prefix: str) -> str | None:
+    """
+    Render a paste-or-upload widget for one document type.
+
+    Returns the extracted text string, or None if nothing was provided.
+    Uses key_prefix to namespace all Streamlit widget keys and avoid
+    conflicts between the Invoice, PO, and Contract widgets on the same page.
+    """
+    from extraction.document_loader import DocumentLoadError, load_document_text
 
     upload_method = st.radio(
-        "Input method",
+        f"{label} — input method",
         ["Paste text", "Upload file"],
         horizontal=True,
+        key=f"{key_prefix}_method",
     )
 
-    invoice_text: str | None = None
+    text: str | None = None
 
     if upload_method == "Paste text":
-        invoice_text = st.text_area(
-            "Invoice text",
-            height=280,
-            placeholder=(
-                "Paste the full invoice text here.\n"
-                "Example:\n"
-                "INVOICE #INV-2025-001\nVendor: Acme Supplies Ltd\n..."
-            ),
+        text = st.text_area(
+            f"{label} text",
+            height=180,
+            placeholder=f"Paste the full {label.lower()} text here…",
+            key=f"{key_prefix}_paste",
         )
+        if text and not text.strip():
+            text = None
     else:
         uploaded = st.file_uploader(
-            "Upload invoice file",
-            type=["txt"],
-            help="Plain-text (.txt) files only, max 1 MB, UTF-8 encoded.",
+            f"Upload {label} file",
+            type=["txt", "pdf"],
+            help=(
+                "Plain-text (.txt, UTF-8) or PDF (.pdf), max 1 MB.  "
+                "PDFs must have an embedded text layer."
+            ),
+            key=f"{key_prefix}_upload",
         )
         if uploaded is not None:
             if uploaded.size > 1_048_576:
-                st.error("File exceeds 1 MB limit.")
+                st.error(f"{label}: file exceeds 1 MB limit.")
             else:
+                raw_bytes = uploaded.read()
                 try:
-                    invoice_text = uploaded.read().decode("utf-8")
-                    st.success(f"Loaded: **{uploaded.name}** ({uploaded.size:,} bytes)")
-                except UnicodeDecodeError:
-                    st.error("File is not valid UTF-8. Please save as UTF-8 and retry.")
+                    text = load_document_text(
+                        raw_bytes,
+                        filename=uploaded.name,
+                        content_type=uploaded.type or None,
+                    )
+                    st.success(f"Loaded **{uploaded.name}** ({uploaded.size:,} bytes)")
+                except DocumentLoadError as exc:
+                    st.error(f"Could not load {label}: {exc.message}")
 
+    return text or None
+
+
+def _render_upload_tab() -> None:
+    st.markdown(
+        "Upload plain-text or PDF documents. The system extracts all fields using "
+        "the LLM extraction pipeline, then runs matching and routing.  "
+        "PO and Contract documents are optional — if omitted, the system falls "
+        "back to database lookup using the references on the invoice."
+    )
+    st.caption("⚠️ Requires a valid `OPENROUTER_API_KEY` in your `.env` file.")
+
+    # ---- Invoice (required) ------------------------------------------------
+    st.subheader("📄 Invoice", divider="gray")
+    invoice_text = _upload_widget("Invoice", "inv")
+
+    # ---- Purchase Order (optional) -----------------------------------------
+    st.subheader("📋 Purchase Order", divider="gray")
+    st.caption(
+        "Optional. If supplied, the extracted PO is upserted into the database.  "
+        "A conflict with an existing record routes the invoice to EXCEPTION."
+    )
+    po_text = _upload_widget("Purchase Order", "po")
+
+    # ---- Contract (optional) -----------------------------------------------
+    st.subheader("📃 Contract", divider="gray")
+    st.caption(
+        "Optional. If supplied, the extracted contract is upserted into the database.  "
+        "A conflict with an existing record routes the invoice to EXCEPTION."
+    )
+    contract_text = _upload_widget("Contract", "contract")
+
+    # ---- Process button ----------------------------------------------------
     if st.button("🚀 Extract & Process", type="primary", disabled=not invoice_text):
         if not invoice_text or not invoice_text.strip():
             st.warning("Please provide invoice text before processing.")
             return
 
         with st.spinner("Running LLM extraction and processing pipeline…"):
-            result = run_extraction_pipeline(invoice_text)
+            result = run_extraction_pipeline_with_documents(
+                invoice_text=invoice_text,
+                po_text=po_text,
+                contract_text=contract_text,
+            )
 
         st.session_state["last_result"] = result
         _render_result(result)
