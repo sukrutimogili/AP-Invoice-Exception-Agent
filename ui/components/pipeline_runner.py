@@ -64,6 +64,7 @@ from models.vendor import VendorCreate
 from repositories.contract_repo import upsert_contract
 from repositories.po_repo import upsert_po
 from repositories.upsert_result import FieldDiff, UpsertConflict, UpsertCreated, UpsertUnchanged
+from repositories.vendor_repo import get_vendor_by_code
 from services.invoice_service import InvoiceProcessingResult, run_pipeline
 
 
@@ -433,6 +434,7 @@ def run_extraction_pipeline_with_documents(
     # -----------------------------------------------------------------------
     extracted_po: PurchaseOrderCreate | None = None
     extracted_po_raw: str | None = None    # discount_term_raw equiv — not used for PO
+    extracted_po_vendor_code: str | None = None  # raw vendor code for UUID resolution
     po_extraction_warning: str | None = None
 
     if po_text and po_text.strip():
@@ -441,6 +443,7 @@ def run_extraction_pipeline_with_documents(
             po_extraction = po_agent.extract(po_text)
             if isinstance(po_extraction, POExtractionSuccess):
                 extracted_po = po_extraction.po
+                extracted_po_vendor_code = po_extraction.vendor_code_extracted
             else:
                 # Typed failure — agent returned POExtractionFailure
                 assert isinstance(po_extraction, POExtractionFailure)
@@ -459,6 +462,7 @@ def run_extraction_pipeline_with_documents(
     # -----------------------------------------------------------------------
     extracted_contract: ContractCreate | None = None
     extracted_contract_raw: str | None = None
+    extracted_contract_vendor_code: str | None = None  # raw vendor code for UUID resolution
     contract_extraction_warning: str | None = None
 
     if contract_text and contract_text.strip():
@@ -470,6 +474,7 @@ def run_extraction_pipeline_with_documents(
             if isinstance(contract_extraction, ContractExtractionSuccess):
                 extracted_contract = contract_extraction.contract
                 extracted_contract_raw = contract_extraction.discount_term_raw
+                extracted_contract_vendor_code = contract_extraction.vendor_code_extracted
             else:
                 # Typed failure — agent returned ContractExtractionFailure
                 assert isinstance(contract_extraction, ContractExtractionFailure)
@@ -498,42 +503,83 @@ def run_extraction_pipeline_with_documents(
         with get_session() as session:
             # --- PO upsert ---
             if extracted_po is not None:
-                po_result = upsert_po(session, extracted_po)
-                if isinstance(po_result, UpsertConflict):
-                    raw_diff = _diff_to_serialisable(po_result.diff)
-                    po_conflict_diff = raw_diff
-                    # Write audit event before returning.
-                    audit_writer.write_document_conflict_detected(
-                        invoice_id=invoice_id,
-                        invoice=invoice,
-                        document_type="PO",
-                        natural_key=extracted_po.po_number,
-                        diff=raw_diff,
-                    )
-                elif isinstance(po_result, (UpsertCreated, UpsertUnchanged)):
-                    resolved_po = po_result.record
-                    session.commit()
+                # Resolve the vendor UUID from the extracted vendor code.
+                # The extraction agent sets po.vendor_id to the raw vendor code
+                # string from the document (e.g. "ACME-001"), NOT a DB UUID.
+                # We must replace it with the real vendors.id before writing.
+                po_to_upsert = extracted_po
+                if extracted_po_vendor_code:
+                    vendor_row = get_vendor_by_code(session, extracted_po_vendor_code)
+                    if vendor_row is None:
+                        # Vendor not in master — warn but do not block; upsert is
+                        # skipped so the row never lands with a broken FK.
+                        po_extraction_warning = (
+                            po_extraction_warning
+                            or f"PO vendor '{extracted_po_vendor_code}' not found in vendor "
+                               f"master — PO not persisted. Add the vendor first."
+                        )
+                        po_to_upsert = None
+                    else:
+                        # Replace the placeholder vendor_id with the real UUID.
+                        po_to_upsert = extracted_po.model_copy(
+                            update={"vendor_id": vendor_row.id}
+                        )
+
+                if po_to_upsert is not None:
+                    po_result = upsert_po(session, po_to_upsert)
+                    if isinstance(po_result, UpsertConflict):
+                        raw_diff = _diff_to_serialisable(po_result.diff)
+                        po_conflict_diff = raw_diff
+                        # Write audit event before returning.
+                        audit_writer.write_document_conflict_detected(
+                            invoice_id=invoice_id,
+                            invoice=invoice,
+                            document_type="PO",
+                            natural_key=extracted_po.po_number,
+                            diff=raw_diff,
+                        )
+                    elif isinstance(po_result, (UpsertCreated, UpsertUnchanged)):
+                        resolved_po = po_result.record
+                        session.commit()
 
             # --- Contract upsert ---
             if extracted_contract is not None:
-                contract_result = upsert_contract(
-                    session,
-                    extracted_contract,
-                    discount_term_raw=extracted_contract_raw,
-                )
-                if isinstance(contract_result, UpsertConflict):
-                    raw_diff = _diff_to_serialisable(contract_result.diff)
-                    contract_conflict_diff = raw_diff
-                    audit_writer.write_document_conflict_detected(
-                        invoice_id=invoice_id,
-                        invoice=invoice,
-                        document_type="CONTRACT",
-                        natural_key=extracted_contract.contract_reference,
-                        diff=raw_diff,
+                # Same vendor-resolution requirement as PO: replace the raw
+                # vendor code placeholder with the real vendors.id UUID.
+                contract_to_upsert = extracted_contract
+                if extracted_contract_vendor_code:
+                    vendor_row = get_vendor_by_code(session, extracted_contract_vendor_code)
+                    if vendor_row is None:
+                        contract_extraction_warning = (
+                            contract_extraction_warning
+                            or f"Contract vendor '{extracted_contract_vendor_code}' not found "
+                               f"in vendor master — contract not persisted. Add the vendor first."
+                        )
+                        contract_to_upsert = None
+                    else:
+                        contract_to_upsert = extracted_contract.model_copy(
+                            update={"vendor_id": vendor_row.id}
+                        )
+
+                if contract_to_upsert is not None:
+                    contract_result = upsert_contract(
+                        session,
+                        contract_to_upsert,
+                        discount_term_raw=extracted_contract_raw,
                     )
-                elif isinstance(contract_result, (UpsertCreated, UpsertUnchanged)):
-                    resolved_contract = contract_result.record
-                    session.commit()
+                    if isinstance(contract_result, UpsertConflict):
+                        raw_diff = _diff_to_serialisable(contract_result.diff)
+                        contract_conflict_diff = raw_diff
+                        audit_writer.write_document_conflict_detected(
+                            invoice_id=invoice_id,
+                            invoice=invoice,
+                            document_type="CONTRACT",
+                            natural_key=extracted_contract.contract_reference,
+                            diff=raw_diff,
+                        )
+                    elif isinstance(contract_result, (UpsertCreated, UpsertUnchanged)):
+                        resolved_contract = contract_result.record
+                        session.commit()
 
     except Exception as exc:
         return PipelineResult(
